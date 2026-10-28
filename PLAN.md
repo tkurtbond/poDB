@@ -322,8 +322,9 @@ test prints the same line for both databases.
 3. Check, with `-g` and a debugger, or with valgrind on the SQLite tests,
    that no handle or `PGresult` leaks in the `Conformance` run.
 
-**Done**, except step 2, which waits for the user's word. Learned on the
-way:
+**Done**, except step 2. The user decided on 2026-10-27 to leave the
+finalizers for later; they are listed under "Later, not scheduled". Learned
+on the way:
 
 - Step 1 came with Phase 4: `Conformance` imports both drivers, and `make
   check` and `make check-postgres` run the same binary with each URL.
@@ -371,6 +372,15 @@ way:
   differs from `doc/Db.Mod`.
 
 ## Later, not scheduled
+
+- Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
+  on each connection and statement, so that one the program forgets is
+  still closed or finalized when the collector frees it. `Close` and
+  `Finalize` stay the documented way, and the finalizer is only a safety
+  net. It ties the drivers to poc's own runtime module, and a finalizer runs
+  only when the collector runs, so it cannot replace `Close`. Decide with
+  the user how it reports an error, and check with `make check-valgrind`
+  that it frees what a forgotten handle holds.
 
 - The BSDs: build and test on cymoril, artos and alerik. The library paths
   are `-link -L/usr/local/lib` on FreeBSD and OpenBSD and `/usr/pkg/lib` on
