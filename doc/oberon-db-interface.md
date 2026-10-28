@@ -78,6 +78,7 @@ Error codes: `noError`, `errConnect`, `errSql`, `errRange`, `errDriver`.
 - Each driver implements `ColumnName` (and `ColumnCount`), which is all the column-by-name readers need.
 - Bind indexes are 1-based; result column indexes are 0-based (see [section 2.7](#27-why-are-parameters-1-based-and-columns-0-based)).
 - Each driver operation begins by setting `c.err := noError`. On failure it sets `c.err` to an `err*` code and `c.msg` to the database's message.
+- `Finalize` and `Close` are the exceptions: they leave `c.err` as it is, so that `Exec` (`Prepare`, `Step`, `Finalize`) can report an error from `Step`, and so that a loop's error survives finalizing its statement.
 - `Step` returns TRUE when a row is available and FALSE when the statement is finished **or** failed. Callers check `c.err` after a stepping loop.
 - `ColumnText` copies into the caller's buffer and truncates if the buffer is too small.
 - Errors are reported by status code and message, since Oberon-2 has no exceptions.

@@ -34,6 +34,8 @@ MODULE Db;
      - Each driver operation first sets c.err := noError; on failure it sets
        c.err to one of the err* codes and c.msg to the database's message
        (Db.SetError does both).
+     - Finalize and Close leave c.err as it is, so that Exec can report an
+       error from Step, and a loop's error survives finalizing its statement.
      - Prepare calls Db.Translate and stores the result in s.params, and sets
        s.conn := c.
      - Step returns TRUE when a row is available, FALSE when the statement is

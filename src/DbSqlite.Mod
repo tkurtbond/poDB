@@ -166,10 +166,9 @@ END Open;
 
 PROCEDURE (c: Connection) Close* ;
 (* Close the connection.  Statements still open keep the database open
-   until they are finalized. *)
+   until they are finalized.  It leaves c.err as it is. *)
   VAR result: SYSTEM.INT32;
 BEGIN
-  c.err := Db.noError;
   IF c.db # 0 THEN result := CloseDatabase(c.db); c.db := 0 END
 END Close;
 
@@ -286,10 +285,10 @@ BEGIN
 END Reset;
 
 PROCEDURE (s: Statement) Finalize* ;
-(* Free the statement.  Finalizing it again does nothing. *)
+(* Free the statement.  Finalizing it again does nothing.  It leaves
+   s.conn.err as it is, so a failed Step is still reported after it. *)
   VAR result: SYSTEM.INT32;
 BEGIN
-  s.conn.err := Db.noError;
   s.onRow := FALSE;
   IF s.stmt # 0 THEN result := FinalizeStatement(s.stmt); s.stmt := 0 END
 END Finalize;

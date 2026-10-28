@@ -226,6 +226,13 @@ drivers. It uses only the common SQL subset (design section 4). It covers:
 
 **Done when** `Conformance sqlite::memory:` passes under both models.
 
+**Done.** Learned on the way: the first run found that `DbSqlite.Finalize`
+cleared `c.err`, so `Exec` reported a failed `Step` (a duplicate key) as
+success. `Finalize` and `Close` now leave `c.err` alone. `src/Db.Mod`'s
+conventions and the design's section 2.4 now say so, since the design's
+`Exec` depends on it. Two more cases came out of it: "finalize keeps the
+error", and SQL holding two statements, which both drivers reject.
+
 ## Phase 4: `DbPostgres`
 
 1. **The test cluster.** `test/pg-start.sh` runs `initdb -A trust -U podb`

@@ -87,3 +87,7 @@ $(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp $(LIBDIR)/db-sqlite
 	  -output-dir $(TOP)/$(BUILD)/$*/source -o $(TOP)/$(BUILD)/$*/source/DbDemo \
 	  -link -lsqlite3 DbDemo.Mod
 	$(BUILD)/$*/source/DbDemo sqlite::memory: | diff -u test/DbDemo.expected -
+	@echo "== conformance, SQLite (-$*)"
+	$(call build-program,$*,test/Conformance.Mod)
+	$(BUILD)/$*/test/Conformance sqlite::memory: > $(BUILD)/$*/test/Conformance-sqlite.out
+	diff -u test/Conformance.expected $(BUILD)/$*/test/Conformance-sqlite.out
