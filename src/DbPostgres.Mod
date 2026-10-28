@@ -15,7 +15,14 @@ MODULE DbPostgres;
    column's text.  ColumnType gives typeInt for int2, int4 and int8,
    typeReal for float4, float8 and numeric, typeBlob for bytea, and
    typeText for every other type, bool included.  The server's notices are
-   not printed. *)
+   not printed.
+
+   A query's rows arrive in chunks of chunkRows (libpq's chunked rows
+   mode), so Step holds one chunk at a time, not the whole result.  While
+   a statement's rows are arriving, its connection can run nothing else.
+   So before another command goes to the server, Drain reads the rest of
+   that statement's results and queues them in the statement, which then
+   steps through them from memory. *)
 
 IMPORT SYSTEM, Db, DbCStrings;
 
@@ -25,6 +32,7 @@ CONST
   emptyQuery = 0;
   commandOk = 1;
   tuplesOk = 2;
+  tuplesChunk = 12;
   textFormat = 0;
   binaryFormat = 1;
   (* pg_type.h *)
@@ -38,6 +46,7 @@ CONST
 
   maxStatementName = 32;
   numberSize = 32;   (* holds a HUGEINT, or a LONGREAL to 17 digits *)
+  chunkRows = 100;   (* the rows in each chunk of a result *)
 
 TYPE
   Text = POINTER TO ARRAY OF CHAR;
@@ -46,19 +55,29 @@ TYPE
   Int32s = POINTER TO ARRAY OF SYSTEM.INT32;
   StatementName = ARRAY maxStatementName OF CHAR;
 
+  Statement = POINTER TO StatementDesc;
+
   Connection = POINTER TO ConnectionDesc;
   ConnectionDesc = RECORD (Db.ConnectionDesc)
     pg: SYSTEM.ADDRESS;   (* PGconn *, or 0 once closed *)
-    prepared: LONGINT     (* the number of statements prepared, for their names *)
+    prepared: LONGINT;    (* the number of statements prepared, for their names *)
+    active: Statement     (* the statement whose results are still arriving, or NIL *)
   END;
 
-  Statement = POINTER TO StatementDesc;
+  Pending = POINTER TO PendingDesc;
+  PendingDesc = RECORD
+    result: SYSTEM.ADDRESS;   (* a PGresult * that Drain read for a statement *)
+    next: Pending
+  END;
+
   StatementDesc = RECORD (Db.StatementDesc)
     name: StatementName;        (* the prepared statement's name on the server *)
     description: SYSTEM.ADDRESS;   (* PGresult * from PQdescribePrepared, or 0 once finalized *)
-    result: SYSTEM.ADDRESS;     (* PGresult * from PQexecPrepared, or 0 *)
+    result: SYSTEM.ADDRESS;     (* the PGresult * Step is reading rows from, or 0 *)
+    first, last: Pending;       (* the results Drain queued, oldest first *)
     executed: BOOLEAN;          (* Step has run the statement since Prepare or Reset *)
-    row, rows: SYSTEM.INT32;    (* the current row (-1 before the first) and the number of rows *)
+    done: BOOLEAN;              (* the run's last result has been read *)
+    row, rows: SYSTEM.INT32;    (* the current row in result (-1 before the first) and result's rows *)
     changes: HUGEINT;           (* the rows the last run changed *)
     value: Values;              (* value[i] is parameter i+1 as text; NIL is NULL *)
     address: Addresses;         (* the addresses of value's texts, for libpq *)
@@ -82,9 +101,11 @@ PROCEDURE ["C", "PQfinish"] Finish (conn: SYSTEM.ADDRESS);
 PROCEDURE ["C", "PQprepare"] PrepareStatement (conn, name, query: SYSTEM.ADDRESS;
     nParams: SYSTEM.INT32; paramTypes: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQdescribePrepared"] DescribePrepared (conn, name: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
-PROCEDURE ["C", "PQexecPrepared"] ExecutePrepared (conn, name: SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQsendQueryPrepared"] SendPrepared (conn, name: SYSTEM.ADDRESS;
     nParams: SYSTEM.INT32; paramValues, paramLengths, paramFormats: SYSTEM.ADDRESS;
-    resultFormat: SYSTEM.INT32): SYSTEM.ADDRESS;
+    resultFormat: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "PQsetChunkedRowsMode"] SetChunkedRows (conn: SYSTEM.ADDRESS; chunkSize: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "PQgetResult"] GetResult (conn: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQclosePrepared"] ClosePrepared (conn, name: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQresultStatus"] ResultStatus (result: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "PQresultErrorMessage"] ResultError (result: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
@@ -184,13 +205,59 @@ BEGIN
   name[i] := 0X
 END MakeName;
 
+PROCEDURE Drain (c: Connection);
+(* Read the rest of the active statement's results, if there is one, and
+   queue them in it, so that c can send another command. *)
+  VAR s: Statement; p: Pending; result: SYSTEM.ADDRESS;
+BEGIN
+  IF c.active # NIL THEN
+    s := c.active; c.active := NIL;
+    result := GetResult(c.pg);
+    WHILE result # 0 DO
+      NEW(p); p.result := result; p.next := NIL;
+      IF s.first = NIL THEN s.first := p ELSE s.last.next := p END;
+      s.last := p;
+      result := GetResult(c.pg)
+    END
+  END
+END Drain;
+
+PROCEDURE NextResult (s: Statement): SYSTEM.ADDRESS;
+(* The next result of s's run, from its queue or from the server; 0 if
+   there are no more. *)
+  VAR c: Connection; result: SYSTEM.ADDRESS;
+BEGIN
+  c := s.conn(Connection);
+  IF s.first # NIL THEN
+    result := s.first.result; s.first := s.first.next;
+    IF s.first = NIL THEN s.last := NIL END
+  ELSIF c.active = s THEN
+    result := GetResult(c.pg);
+    IF result = 0 THEN c.active := NIL END
+  ELSE
+    result := 0
+  END;
+  RETURN result
+END NextResult;
+
+PROCEDURE Discard (s: Statement);
+(* Free the results of s's run, both those read and those still to come.
+   The server sends the rest of a result even so; libpq has no way to stop
+   it but cancelling, which could hit the next command instead. *)
+  VAR result: SYSTEM.ADDRESS;
+BEGIN
+  Clear(s.result); s.result := 0;
+  result := NextResult(s);
+  WHILE result # 0 DO Clear(result); result := NextResult(s) END
+END Discard;
+
 PROCEDURE Deallocate (c: Connection; name: StatementName);
 (* Drop the prepared statement name on c's server.  PQclosePrepared does
    what DEALLOCATE does, but as a protocol message rather than an SQL
    command, so it works in a transaction that has already failed, where
    the server refuses every command but ROLLBACK. *)
 BEGIN
-  IF c.pg # 0 THEN Clear(ClosePrepared(c.pg, SYSTEM.ADR(name))) END
+  IF c.pg # 0 THEN Drain(c); Clear(ClosePrepared(c.pg, SYSTEM.ADR(name))) END
 END Deallocate;
 
 
@@ -200,7 +267,7 @@ PROCEDURE (d: Driver) Open* (url: ARRAY OF CHAR): Db.Connection;
 (* Connect to the database that url names; see the module's comment. *)
   VAR c: Connection;
 BEGIN
-  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.prepared := 0;
+  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.prepared := 0; c.active := NIL;
   c.pg := ConnectDatabase(SYSTEM.ADR(url));
   IF c.pg = 0 THEN Db.lastError := "DbPostgres: out of memory"; RETURN NIL END;
   IF ConnectionStatus(c.pg) # connectionOk THEN
@@ -219,7 +286,7 @@ PROCEDURE (c: Connection) Close* ;
 (* Close the connection.  Its statements can then only be finalized.  It
    leaves c.err as it is. *)
 BEGIN
-  IF c.pg # 0 THEN Finish(c.pg); c.pg := 0 END
+  IF c.pg # 0 THEN Finish(c.pg); c.pg := 0; c.active := NIL END
 END Close;
 
 PROCEDURE (c: Connection) Prepare* (sql: ARRAY OF CHAR; VAR s: Db.Statement): BOOLEAN;
@@ -237,6 +304,7 @@ BEGIN
       "DbPostgres: placeholders mix ? and :name, number over 64, or have a name over 31 characters");
     RETURN FALSE
   END;
+  Drain(c);
   INC(c.prepared);
   MakeName(c.prepared, st.name);
   result := PrepareStatement(c.pg, SYSTEM.ADR(st.name), SYSTEM.ADR(translated[0]), st.params.n, 0);
@@ -257,7 +325,8 @@ BEGIN
   n := st.params.n;
   IF n = 0 THEN n := 1 END;   (* so that address[0] exists *)
   NEW(st.value, n); NEW(st.address, n); NEW(st.length, n); NEW(st.format, n);
-  st.result := 0; st.executed := FALSE; st.row := -1; st.rows := 0; st.changes := 0;
+  st.result := 0; st.first := NIL; st.last := NIL;
+  st.executed := FALSE; st.done := FALSE; st.row := -1; st.rows := 0; st.changes := 0;
   st.conn := c;
   s := st;
   RETURN TRUE
@@ -347,32 +416,75 @@ END BindBlob;
 (* ---- Statement: stepping ---- *)
 
 PROCEDURE Run (s: Statement);
-(* Execute s with its current parameters and keep the result. *)
-  VAR c: Connection; i: INTEGER; status: SYSTEM.INT32;
+(* Send s, with its current parameters, to the server, and make it c's
+   active statement; its results are read as Step needs them. *)
+  VAR c: Connection; i: INTEGER;
 BEGIN
   c := s.conn(Connection);
+  Drain(c);
   FOR i := 0 TO s.params.n - 1 DO
     IF s.value[i] = NIL THEN s.address[i] := 0 ELSE s.address[i] := SYSTEM.ADR(s.value[i][0]) END
   END;
-  s.result := ExecutePrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]),
-    SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat);
-  s.executed := TRUE; s.row := -1; s.rows := 0;
-  status := ResultStatus(s.result);
-  IF status = tuplesOk THEN s.rows := RowCount(s.result); s.changes := ChangesOf(s.result)
-  ELSIF status = commandOk THEN s.changes := ChangesOf(s.result)
-  ELSIF status = emptyQuery THEN Db.SetError(c, Db.errSql, "DbPostgres: no SQL statement")
-  ELSIF status # commandOk THEN SetResultError(c, s.result)
+  s.executed := TRUE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0;
+  IF SendPrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]),
+      SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat) = 0 THEN
+    SetResultError(c, 0); s.done := TRUE
+  ELSE
+    c.active := s;
+    (* If libpq refuses chunked rows, the whole result comes as one. *)
+    IF SetChunkedRows(c.pg, chunkRows) = 0 THEN END
   END
 END Run;
+
+PROCEDURE ReadResult (s: Statement);
+(* Replace s.result with the run's next result.  A chunk of rows leaves s
+   on the row before its first.  The last result sets s.done, or reports
+   the run's error.  The command tag, and so the number of rows changed, is
+   on whichever result libpq made when the command completed: the last
+   chunk if it was partly filled, else the last result. *)
+  VAR c: Connection; result: SYSTEM.ADDRESS; status: SYSTEM.INT32; changes: HUGEINT;
+BEGIN
+  c := s.conn(Connection);
+  Clear(s.result); s.result := 0; s.row := -1; s.rows := 0;
+  result := NextResult(s);
+  IF result = 0 THEN
+    s.done := TRUE;
+    Db.SetError(c, Db.errSql, "DbPostgres: the server sent no result")
+  ELSE
+    status := ResultStatus(result);
+    IF (status = tuplesChunk) OR (status = tuplesOk) OR (status = commandOk) THEN
+      changes := ChangesOf(result);
+      IF changes # 0 THEN s.changes := changes END
+    END;
+    IF (status = tuplesChunk) OR (status = tuplesOk) THEN
+      s.result := result; s.rows := RowCount(result)
+    END;
+    IF status # tuplesChunk THEN
+      s.done := TRUE;
+      IF status = emptyQuery THEN Db.SetError(c, Db.errSql, "DbPostgres: no SQL statement")
+      ELSIF (status # tuplesOk) & (status # commandOk) THEN SetResultError(c, result)
+      END;
+      IF status # tuplesOk THEN Clear(result) END;
+      (* Read the NULL that ends the run, which frees the connection. *)
+      result := NextResult(s);
+      WHILE result # 0 DO Clear(result); result := NextResult(s) END
+    END
+  END
+END ReadResult;
 
 PROCEDURE (s: Statement) Step* (): BOOLEAN;
 (* Advance to the next row: TRUE if there is one, FALSE when the statement
    is done or has failed (then s.conn.err says which).  The first Step after
-   Prepare or Reset executes the statement and fetches all its rows. *)
+   Prepare or Reset sends the statement to the server; a Step that runs off
+   the end of a chunk of rows reads the next. *)
 BEGIN
   IF ~Live(s) THEN RETURN FALSE END;
   IF ~s.executed THEN Run(s) END;
   IF s.row < s.rows THEN INC(s.row) END;
+  WHILE (s.row >= s.rows) & ~s.done & (s.conn.err = Db.noError) DO
+    ReadResult(s);
+    IF s.row < s.rows THEN INC(s.row) END
+  END;
   RETURN s.row < s.rows
 END Step;
 
@@ -381,8 +493,8 @@ PROCEDURE (s: Statement) Reset* ;
    their values until they are bound again. *)
 BEGIN
   IF Live(s) THEN
-    Clear(s.result); s.result := 0;
-    s.executed := FALSE; s.row := -1; s.rows := 0; s.changes := 0
+    Discard(s);
+    s.executed := FALSE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0
   END
 END Reset;
 
@@ -392,9 +504,9 @@ PROCEDURE (s: Statement) Finalize* ;
    reported after it. *)
 BEGIN
   IF s.description # 0 THEN
-    Clear(s.result); s.result := 0;
+    Discard(s);
     Clear(s.description); s.description := 0;
-    s.executed := FALSE; s.row := -1; s.rows := 0;
+    s.executed := FALSE; s.done := FALSE; s.row := -1; s.rows := 0;
     s.value := NIL; s.address := NIL; s.length := NIL; s.format := NIL;
     Deallocate(s.conn(Connection), s.name)
   END
@@ -405,7 +517,7 @@ PROCEDURE (s: Statement) Changes* (): HUGEINT;
 (* The rows the statement's last run inserted, updated or deleted, once Step
    has returned FALSE. *)
 BEGIN
-  IF (s.description = 0) OR ~s.executed OR (s.row < s.rows) THEN RETURN 0 END;
+  IF (s.description = 0) OR ~s.executed OR ~s.done OR (s.row < s.rows) THEN RETURN 0 END;
   RETURN s.changes
 END Changes;
 

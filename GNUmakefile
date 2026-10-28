@@ -164,3 +164,7 @@ $(addprefix check-postgres-,$(MODELS)): check-postgres-%: $(addprefix $(LIBDIR)/
 	$(call build-program,$*,test/Conformance.Mod)
 	$(BUILD)/$*/test/Conformance "$$(test/pg-url.sh)" > $(BUILD)/$*/test/Conformance-postgres.out
 	diff -u test/Conformance.expected $(BUILD)/$*/test/Conformance-postgres.out
+	@echo "== PostgreSQL only (-$*)"
+	$(call build-program,$*,test/TestPostgres.Mod)
+	$(BUILD)/$*/test/TestPostgres "$$(test/pg-url.sh)" > $(BUILD)/$*/test/TestPostgres.out
+	diff -u test/TestPostgres.expected $(BUILD)/$*/test/TestPostgres.out

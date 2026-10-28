@@ -204,10 +204,15 @@ with `conn.err` set to `errRange`.
   `bytea`.
 - A `numeric` reads as `typeReal`, so `ColumnReal` loses digits beyond a
   `LONGREAL`'s. Read it with `ColumnText` to keep them all.
-- libpq loads a query's whole result into memory at the first `Step`.
-  `Step` then moves through it. A very large result needs `LIMIT` and
-  `OFFSET`, or a cursor (`DECLARE ... CURSOR` and `FETCH`), inside a
-  transaction.
+- A query's rows arrive in chunks of 100, and `Step` holds one chunk at a
+  time. But while they arrive the connection can do nothing else, so a
+  statement run inside a loop over another's rows makes the driver read
+  the rest of the outer result into memory. For a very large result, run
+  the inner statements on a second connection.
+- `Reset` or `Finalize` partway through a result reads and discards the
+  rest of it.
+- A query that fails partway gives the rows before the error, then the
+  error, as on SQLite.
 - The server's notices, such as `DROP TABLE IF EXISTS`'s "skipping", are
   discarded.
 - Operators containing `?` (some of JSONB's, such as `?|`) confuse the

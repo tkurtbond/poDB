@@ -176,7 +176,7 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 | `Open` | `PQconnectdb` / `PQstatus` |
 | `Prepare` | `Db.Translate(sql, "$", …)`, then `PQprepare` with `nParams` = `s.params.n`, under a name unique on the connection (`podb_1`, `podb_2`, …), then `PQdescribePrepared` |
 | `Bind*` | Collect parameters as text in the driver; numbers are formatted to text. `BindBlob`'s bytes go in binary format, the one exception to D6 |
-| `Step` | First call runs `PQexecPrepared`; later calls advance a row cursor over the `PGresult` |
+| `Step` | First call sends the statement with `PQsendQueryPrepared` and asks for `PQsetChunkedRowsMode`; later calls advance a row cursor over the current chunk, and read the next with `PQgetResult` |
 | `ColumnCount` / `ColumnName` | `PQnfields` / `PQfname` on the description, so they work before the first `Step` |
 | `Changes` | `PQcmdTuples`, when `PQcmdStatus` is an `INSERT`, `UPDATE`, `DELETE` or `MERGE` |
 | `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype`; numbers are parsed from text, and `ColumnBlob` unescapes a `bytea` with `PQunescapeBytea` |
@@ -184,7 +184,7 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 | `Close` | `PQfinish` |
 | Error messages | `PQerrorMessage` |
 
-libpq returns the whole result set at once, so the driver must track the current row itself. Unlike SQLite, `Step` does not stream rows from the server by default.
+By default libpq returns the whole result set at once. The driver asks instead for chunks of 100 rows, so `Step` holds one chunk at a time and tracks the current row in it. While one statement's rows are arriving, the connection can run nothing else, so before any other command the driver reads the rest of that statement's results into memory, and the statement then steps through them. A query that fails partway gives the rows of the chunks before the error, then the error, as on SQLite. The command tag that `Changes` reads is on the last chunk if it is partly filled, and on the final result if not.
 
 ODBC (for example unixODBC) is an alternative single driver that could cover both databases, at the cost of an extra layer and driver-manager configuration.
 
@@ -197,7 +197,7 @@ ODBC (for example unixODBC) is an alternative single driver that could cover bot
 - **Reading a value as the wrong type.** SQLite converts any value to the type asked for: `ColumnInt` of the text `'abc'` is 0, with no error. The PostgreSQL driver parses the value's text, so `ColumnInt` of text that is not a number is 0 with `errRange`. Both truncate a real number toward zero for `ColumnInt`. A PostgreSQL `boolean` reads as the text `t` or `f`, where SQLite stores 1 or 0.
 - **Dialect features.** Date and time functions, upsert syntax (`ON CONFLICT`), and concurrency and locking behaviour differ. Stay within the common SQL subset, or isolate dialect-specific statements in one module.
 - **Concurrency.** SQLite allows one writer at a time. PostgreSQL's multi-user behaviour may expose problems that never appear in single-user SQLite testing.
-- **Result streaming.** As noted above, libpq loads the whole result by default, which matters for very large queries.
+- **Result streaming.** The PostgreSQL driver streams a result in chunks, but only while the program runs no other statement on the connection. A statement run during a loop over another's rows makes the driver read the rest of the outer result into memory. For a very large result, use a second connection for the inner statements. `Reset` or `Finalize` partway through a result still reads and discards the rest of it.
 
 ## 5. Files
 
@@ -255,6 +255,7 @@ These were decided while planning the implementation (on 2026-10-27):
 - **Forward declarations.** poc requires a procedure, type-bound ones included, to be declared before it is called, so `Db.Mod` declares `Step` and `Finalize` with `PROCEDURE ^` before `Exec` uses them.
 - **`LONGINT` indexes into character arrays.** Under poc's default size model `INTEGER` stops at 32767, and SQL text or a value can be longer. `Translate` and the name lookups index with `LONGINT`.
 - **Column names up to 127 characters** (`maxColumnName`), not 63. PostgreSQL's limit is 63 bytes, but SQLite has none, and an expression gives a long name.
+- **Streaming PostgreSQL results** (2026-10-27): the driver reads a result in chunks of 100 rows (`PQsetChunkedRowsMode`, libpq 17), as section 3 describes.
 - **Additions to the interface** (2026-10-27): `typeBlob`, `BindBlob`, `ColumnBlob`, `Changes`, `ColumnIsNull`, and their `ByName` forms. `Translate` handles dollar-quoted strings.
 - **`Db.Open`** checks the scheme's length before copying it, rejects a URL with no scheme, sets `lastError` to `""` on success, and sets it to a message if a driver returns NIL without one.
 
@@ -263,7 +264,6 @@ These were decided while planning the implementation (on 2026-10-27):
 ### 6.4 Not done
 
 - Finalizers that close a connection or statement the program forgot. They would tie the drivers to poc's `GarbageCollectedHeap` and are left for later.
-- Streaming large PostgreSQL results (`PQsetSingleRowMode`).
 - An ODBC driver, and the BSDs.
 
 ## Sources

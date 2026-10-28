@@ -520,6 +520,79 @@ BEGIN
 END TestBlobs;
 
 
+(* ---- Long results ---- *)
+
+PROCEDURE Series (VAR s: Db.Statement);
+(* Prepare a select of the 250 rows 1 .. 250, more than a PostgreSQL chunk. *)
+BEGIN
+  Prepare("WITH RECURSIVE series (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 250) SELECT i FROM series", s)
+END Series;
+
+PROCEDURE ShowSum (label: ARRAY OF CHAR; rows, sum: HUGEINT);
+(* label: the rows read, their sum, and the connection's error *)
+BEGIN
+  Out.String(label); Out.String(": rows="); Out.Int(rows, 0);
+  Out.String(" sum="); Out.Int(sum, 0); Out.String(" err="); Out.Int(conn.err, 0); Out.Ln
+END ShowSum;
+
+PROCEDURE TestLong;
+  VAR a, b, insert: Db.Statement; rows, sum, other: HUGEINT; more, ok: BOOLEAN;
+BEGIN
+  Heading("Long results");
+  Series(a);
+  rows := 0; sum := 0;
+  WHILE a.Step() DO INC(rows); INC(sum, a.ColumnInt(0)) END;
+  ShowSum("a long result", rows, sum);
+
+  (* write to the database while the rows are arriving *)
+  Prepare("INSERT INTO podb_conformance (id, name) VALUES (?, 'long')", insert);
+  a.Reset;
+  rows := 0; sum := 0; ok := TRUE;
+  WHILE a.Step() DO
+    INC(rows); INC(sum, a.ColumnInt(0));
+    IF rows MOD 50 = 0 THEN
+      insert.BindInt(1, 1000 + rows);
+      ok := ok & ~insert.Step() & (conn.err = Db.noError);
+      insert.Reset;
+      ok := ok & (Count() > 0)
+    END
+  END;
+  ShowSum("writes while stepping", rows, sum);
+  Check("each write", ok);
+  insert.Finalize;
+  Changes("delete what they wrote", "DELETE FROM podb_conformance WHERE id >= 1000");
+
+  (* two long results stepped in turn *)
+  a.Reset;
+  Series(b);
+  rows := 0; sum := 0; other := 0; more := TRUE;
+  WHILE more DO
+    more := a.Step();
+    IF more THEN INC(rows); INC(sum, a.ColumnInt(0)) END;
+    IF b.Step() THEN INC(other, b.ColumnInt(0)) END
+  END;
+  ShowSum("two at once, the first", rows, sum);
+  ShowSum("two at once, the second", 250, other);
+  b.Finalize;
+
+  (* stop halfway *)
+  a.Reset;
+  rows := 0;
+  WHILE (rows < 150) & a.Step() DO INC(rows) END;
+  a.Reset;
+  rows := 0; sum := 0;
+  WHILE a.Step() DO INC(rows); INC(sum, a.ColumnInt(0)) END;
+  ShowSum("reset halfway, then all", rows, sum);
+  a.Reset;
+  rows := 0;
+  WHILE (rows < 150) & a.Step() DO INC(rows) END;
+  a.Finalize;
+  Check("finalized halfway, then a count", Count() >= 0);
+  Check("Exec of a long result",
+    conn.Exec("WITH RECURSIVE series (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < 250) SELECT i FROM series"))
+END TestLong;
+
+
 (* ---- Many statements ---- *)
 
 PROCEDURE TestMany;
@@ -559,6 +632,7 @@ BEGIN
   TestReturning;
   TestChanges;
   TestBlobs;
+  TestLong;
   TestMany;
   Setup("DROP TABLE podb_conformance");
   conn.Close

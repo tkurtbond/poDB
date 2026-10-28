@@ -106,5 +106,16 @@ select BLOBs: ok
 text as a BLOB: length=3 bytes=65,100,97
 an integer as a BLOB: length=2 bytes=51,55
 
+== Long results
+a long result: rows=250 sum=31375 err=0
+writes while stepping: rows=250 sum=31375 err=0
+each write: ok
+delete what they wrote: 0 then 5, after Reset 0
+two at once, the first: rows=250 sum=31375 err=0
+two at once, the second: rows=250 sum=31375 err=0
+reset halfway, then all: rows=250 sum=31375 err=0
+finalized halfway, then a count: ok
+Exec of a long result: ok
+
 == Many statements
 1000 statements prepared and finalized: ok

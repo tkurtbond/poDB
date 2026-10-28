@@ -394,6 +394,31 @@ The user approved these on 2026-10-27:
 - `ColumnBlob` returns the whole length, so a caller can find it with a
   small buffer and read again with a big enough one.
 
+## After Phase 6: streaming PostgreSQL results
+
+The user asked for this on 2026-10-27.
+
+1. `Step` sends the statement with `PQsendQueryPrepared`, asks for
+   `PQsetChunkedRowsMode` (libpq 17, which D5 already needs) with 100 rows
+   a chunk, and reads each chunk with `PQgetResult` as it needs it.
+2. A connection can run one command at a time, so before it sends another
+   (`Prepare`, another statement's first `Step`, `Finalize`'s
+   `PQclosePrepared`) the driver reads the rest of the active statement's
+   results and queues them in that statement. `Reset` and `Finalize` read
+   and free what is left.
+3. `Conformance` steps 250 rows while writing, steps two such results in
+   turn, and stops halfway. `test/TestPostgres.Mod` runs in `make
+   check-postgres` and checks what only PostgreSQL does.
+
+**Done.** Learned on the way:
+
+- A query that fails partway now gives rows before its error: 200 rows,
+  then the error at row 250. That is what proves the rows are streamed.
+- The command tag, and so `Changes`, is on the last chunk when that chunk
+  is partly filled, and on the final `PGRES_TUPLES_OK` otherwise.
+- No cancel: `PQcancel` could reach the server after the result has ended
+  and cancel the next command instead.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
@@ -408,8 +433,6 @@ The user approved these on 2026-10-27:
 - The BSDs: build and test on cymoril, artos and alerik. The library paths
   are `-link -L/usr/local/lib` on FreeBSD and OpenBSD and `/usr/pkg/lib` on
   NetBSD, and the `GNUmakefile` must work with `gmake`.
-- PostgreSQL single-row mode (`PQsetSingleRowMode`), to stream large
-  results.
 - An ODBC driver (unixODBC), as the design's section 3 mentions.
 - VAX/VMS: out of scope. Neither SQLite nor libpq exists for VMS 5.5-2.
 

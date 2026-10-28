@@ -1,0 +1,5 @@
+an error at row 250: rows=200 err=2
+an error at row 1: rows=0 err=2
+UPDATE ... RETURNING of 250 rows: rows=250 Changes=250 err=0
+UPDATE ... RETURNING of 200 rows: rows=200 Changes=200 err=0
+the connection still works
