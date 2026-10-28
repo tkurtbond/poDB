@@ -15,4 +15,8 @@ cursors open after Finalize: 0 err=0
 PrepareQuery of an INSERT: FALSE err=2
 an error in a cursor's third batch: 200 err=2
 rollback after it: TRUE err=0
+TimeZone: UTC reads as 0-0-0 0:0:0 err=3
+a timestamptz at +02: 2026-10-28 12:30:05+00 reads as 2026-10-28 12:30:5 err=0
+bound to a timestamptz: 2026-10-28 14:30:05+00 reads as 2026-10-28 14:30:5 err=0
+and as a timestamp in UTC: 2026-10-28 14:30:05 reads as 2026-10-28 14:30:5 err=0
 the connection still works

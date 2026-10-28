@@ -128,6 +128,40 @@ BEGIN
   Result("rollback after it", conn.Rollback())
 END TestCursors;
 
+PROCEDURE ShowTime (label, sql: ARRAY OF CHAR; bind: BOOLEAN);
+(* Show the time stamp sql reads, with 2026-10-28 14:30:05 bound to its
+   parameter if bind. *)
+  VAR s: Db.Statement; d: Db.DateTime; text: ARRAY 64 OF CHAR;
+BEGIN
+  IF ~conn.Prepare(sql, s) THEN
+    Out.String("prepare failed: "); Out.String(conn.msg); Out.Ln; HALT(1)
+  END;
+  IF bind THEN
+    d.year := 2026; d.month := 10; d.day := 28; d.hour := 14; d.minute := 30; d.second := 5;
+    d.microsecond := 0;
+    s.BindDateTime(1, d)
+  END;
+  IF s.Step() THEN
+    s.ColumnText(0, text);
+    s.ColumnDateTime(0, d);
+    Out.String(label); Out.String(": "); Out.String(text); Out.String(" reads as ");
+    Out.Int(d.year, 0); Out.String("-"); Out.Int(d.month, 0); Out.String("-"); Out.Int(d.day, 0);
+    Out.String(" "); Out.Int(d.hour, 0); Out.String(":"); Out.Int(d.minute, 0); Out.String(":");
+    Out.Int(d.second, 0); Out.String(" err="); Out.Int(conn.err, 0); Out.Ln
+  END;
+  s.Finalize
+END ShowTime;
+
+PROCEDURE TestTimeZone;
+(* The driver sets the session's TimeZone to UTC, so a timestamptz reads in
+   UTC and a time stamp bound to one is taken as UTC. *)
+BEGIN
+  ShowTime("TimeZone", "SELECT current_setting('TimeZone')", FALSE);
+  ShowTime("a timestamptz at +02", "SELECT TIMESTAMPTZ '2026-10-28 14:30:05+02'", FALSE);
+  ShowTime("bound to a timestamptz", "SELECT CAST(? AS TIMESTAMPTZ)", TRUE);
+  ShowTime("and as a timestamp in UTC", "SELECT CAST(? AS TIMESTAMPTZ) AT TIME ZONE 'UTC'", TRUE)
+END TestTimeZone;
+
 BEGIN
   IF Args.argc > 1 THEN Args.Get(1, url) ELSE url := "postgres:///podb_test" END;
   IF ~Db.Open(url, conn) THEN
@@ -144,6 +178,7 @@ BEGIN
   ChangesReturning(250);
   ChangesReturning(200);
   TestCursors;
+  TestTimeZone;
   IF conn.Exec("SELECT 1") THEN Out.String("the connection still works") ELSE Out.String("FAIL: ") END;
   Out.Ln;
   conn.Close

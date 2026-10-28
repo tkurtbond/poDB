@@ -69,7 +69,7 @@ Oberon-2 has no interfaces, so abstraction is done with type-bound procedures on
 | `stmt.ParamIndex(name): INTEGER` | 1-based number for a parameter name, or 0 |
 | `Db.Translate(sql, prefix, VAR out, VAR params): BOOLEAN` | Used by drivers: rewrites placeholders to `?1…` or `$1…` and records names |
 | `stmt.Step(): BOOLEAN` | Advance; TRUE if a row is available |
-| `stmt.Reset` / `stmt.Finalize` | Rewind, or release the statement |
+| `stmt.Reset` / `stmt.Finalize` | Rewind, keeping the parameters' values, or release the statement |
 | `stmt.Changes(): HUGEINT` | Rows the last run inserted, updated or deleted, once `Step` has returned FALSE; 0 before then, after `Reset`, and for any other statement |
 | `stmt.ColumnCount()` / `ColumnName(i, VAR buf)` / `ColumnType(i)` | Result metadata (columns 0-based) |
 | `stmt.ColumnInt(i)` / `ColumnReal(i)` / `ColumnText(i, VAR buf)` | Read column values by number |
@@ -93,6 +93,7 @@ Error codes: `noError`, `errConnect`, `errSql`, `errRange`, `errDriver`.
 - Each driver operation begins by setting `c.err := noError`. On failure it sets `c.err` to an `err*` code and `c.msg` to the database's message.
 - `Finalize` and `Close` are the exceptions: they leave `c.err` as it is, so that `Exec` (`Prepare`, `Step`, `Finalize`) can report an error from `Step`, and so that a loop's error survives finalizing its statement.
 - `Step` returns TRUE when a row is available and FALSE when the statement is finished **or** failed. Callers check `c.err` after a stepping loop.
+- `Reset` keeps the parameters' values, so a program binds again only those that change.
 - `ColumnText` copies into the caller's buffer and truncates if the buffer is too small. `ColumnBlob` does too, and returns the value's whole length.
 - `Changes` counts only the rows the statement itself inserted, updated or deleted, and only once `Step` has returned FALSE. `Reset` sets it back to 0.
 - The connection's `Changes` is set whenever a statement's `Step` returns FALSE at the end of its run: to that statement's `Changes`, or to 0 if the run failed. A statement that fails in `Prepare` never runs and leaves it as it was, so check `Exec`'s result before reading it. `Exec` steps its statement to the end, so a statement with `RETURNING` is counted whole.
@@ -172,8 +173,8 @@ END;
 ```
 
 - **Booleans.** `BindBool` binds 1 or 0 with `BindInt`. SQLite stores the integer, and PostgreSQL accepts the text `1` or `0` for a `boolean` parameter. `ColumnBool` is `ColumnInt(i) # 0`, and the PostgreSQL driver reads a `boolean` as `typeInt` with the value 1 or 0, as SQLite stores it, so a comparison such as `SELECT a = b` reads the same on both.
-- **Dates and time stamps.** `BindDate` binds `YYYY-MM-DD`, ignoring the time; `BindDateTime` binds `YYYY-MM-DD HH:MM:SS`, with `.ffffff` when the microseconds are not 0. Both check the date against the Gregorian calendar (leap years included) and the time's ranges, and set `errRange` instead of binding an invalid value. SQLite stores the text, which sorts and compares in date order and which its date functions understand. PostgreSQL takes it for a `date` or `timestamp`, and the driver sets `DateStyle` to `ISO` when it connects, so the server sends values back in the same form. `ColumnDateTime` parses `YYYY-MM-DD`, optionally followed by a space or `T`, `HH:MM`, `:SS` and a fraction of any length (digits beyond the sixth are dropped). A date alone has the time 00:00:00. Anything else, such as a value with a time zone, gives all fields 0 and `errRange`.
-- There are no time zones. Declare such columns `DATE` or `TIMESTAMP`, not `TIMESTAMPTZ`, and keep the values in one zone, such as UTC.
+- **Dates and time stamps.** `BindDate` binds `YYYY-MM-DD`, ignoring the time; `BindDateTime` binds `YYYY-MM-DD HH:MM:SS`, with `.ffffff` when the microseconds are not 0. Both check the date against the Gregorian calendar (leap years included) and the time's ranges, and set `errRange` instead of binding an invalid value. SQLite stores the text, which sorts and compares in date order and which its date functions understand. PostgreSQL takes it for a `date` or `timestamp`, and the driver sets `DateStyle` to `ISO` when it connects, so the server sends values back in the same form. `ColumnDateTime` parses `YYYY-MM-DD`, optionally followed by a space or `T`, `HH:MM`, `:SS` and a fraction of any length (digits beyond the sixth are dropped). A date alone has the time 00:00:00. A time zone offset is accepted only if it is zero (`Z`, `+00`, `+00:00`, `+0000`). Anything else, such as a time with another offset, gives all fields 0 and `errRange`, rather than a time silently shifted.
+- `DateTime` has no time zone; its values are best kept in UTC. The PostgreSQL driver sets the session's `TimeZone` to `UTC` when it connects. A `timestamptz` then reads in UTC, with the offset `+00` that `ColumnDateTime` accepts, and a time stamp bound to a `timestamptz` parameter is taken as UTC, not as the server's local time. So `TIMESTAMP` and `TIMESTAMPTZ` columns both work, provided the program's values are UTC. The cost is that the session's SQL works in UTC too: `now()` displays in UTC, and `date_trunc('day', ...)` of a `timestamptz` cuts days at UTC midnight. A program that wants another zone can run `SET TimeZone` itself, and then a `timestamptz` reads with an offset that `ColumnDateTime` rejects. Converting to and from local time would need the zone database, which poDB does not have.
 
 ### 2.10 Queries read a batch at a time
 
@@ -204,7 +205,7 @@ END;
 
 | `Db` operation | libpq API |
 |---|---|
-| `Open` | `PQconnectdb` / `PQstatus`, then `SET DateStyle TO ISO` with `PQexec` |
+| `Open` | `PQconnectdb` / `PQstatus`, then `SET DateStyle TO ISO; SET TimeZone TO 'UTC'` with `PQexec` |
 | `Prepare` | `Db.Translate(sql, "$", …)`, then `PQprepare` with `nParams` = `s.params.n`, under a name unique on the connection (`podb_1`, `podb_2`, …), then `PQdescribePrepared` |
 | `Bind*` | Collect parameters as text in the driver; numbers are formatted to text. `BindBlob`'s bytes go in binary format, the one exception to D6 |
 | `Step` | First call sends the statement with `PQsendQueryPrepared` and asks for `PQsetChunkedRowsMode`; later calls advance a row cursor over the current chunk, and read the next with `PQgetResult` |
@@ -294,6 +295,7 @@ These were decided while planning the implementation (on 2026-10-27):
 - **Streaming PostgreSQL results** (2026-10-27): the driver reads a result in chunks of 100 rows (`PQsetChunkedRowsMode`, libpq 17), as section 3 describes.
 - **Additions to the interface** (2026-10-27): `typeBlob`, `BindBlob`, `ColumnBlob`, `Changes`, `ColumnIsNull`, and their `ByName` forms. `Translate` handles dollar-quoted strings.
 - **Booleans, dates and times, and the connection's `Changes`** (2026-10-28): `DateTime`, `BindBool`, `BindDate`, `BindDateTime`, `ColumnBool`, `ColumnDateTime` and their `ByName` forms (section 2.9), and `Connection.Changes`. `Exec` now steps its statement to the end instead of once. The PostgreSQL driver reads a `boolean` as the integer 1 or 0.
+- **`Reset` keeps the parameters, and time zones** (2026-10-28): the SQLite driver's `Reset` no longer clears the parameters, as the PostgreSQL driver's never did (section 2.4). The PostgreSQL driver sets `TimeZone` to `UTC`, and `ColumnDateTime` accepts a zero offset (section 2.9).
 - **`PrepareQuery`** (2026-10-28): queries read a batch at a time through a PostgreSQL cursor (section 2.10).
 - **`Db.Open`** checks the scheme's length before copying it, rejects a URL with no scheme, sets `lastError` to `""` on success, and sets it to a message if a driver returns NIL without one.
 

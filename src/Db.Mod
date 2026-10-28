@@ -40,6 +40,8 @@ MODULE Db;
        s.conn := c.
      - Step returns TRUE when a row is available, FALSE when the statement is
        done OR failed; callers check c.err after the loop.
+     - Reset keeps the parameters' values, so a program binds again only
+       those that change.
      - ColumnText copies into the caller's buffer and truncates if too small;
        ColumnBlob does too, and returns the value's whole length.
      - Changes is the number of rows the statement's last run inserted,
@@ -442,7 +444,8 @@ BEGIN
 END Step;
 
 PROCEDURE (s: Statement) Reset* ;
-(* Rewind so the statement can be bound and stepped again. *)
+(* Rewind so the statement can be stepped again.  Its parameters keep their
+   values until they are bound again. *)
 END Reset;
 
 PROCEDURE (s: Statement) Finalize* ;
@@ -680,10 +683,30 @@ BEGIN
   RETURN TRUE
 END Separator;
 
+PROCEDURE ZeroOffset (VAR t: ARRAY OF CHAR; VAR i: LONGINT): BOOLEAN;
+(* Skip a time zone offset of zero at t[i], if there is one: "Z", or "+" or
+   "-" and "00", optionally followed by "00" or ":00".  FALSE for any
+   other offset, which would shift the time. *)
+  VAR n: INTEGER;
+BEGIN
+  IF t[i] = "Z" THEN INC(i)
+  ELSIF (t[i] = "+") OR (t[i] = "-") THEN
+    INC(i);
+    IF ~Digits(t, i, 2, n) OR (n # 0) THEN RETURN FALSE END;
+    IF t[i] = ":" THEN
+      INC(i);
+      IF ~Digits(t, i, 2, n) OR (n # 0) THEN RETURN FALSE END
+    ELSIF IsDigit(t[i]) & (~Digits(t, i, 2, n) OR (n # 0)) THEN RETURN FALSE
+    END
+  END;
+  RETURN TRUE
+END ZeroOffset;
+
 PROCEDURE ParseDateTime (VAR t: ARRAY OF CHAR; VAR d: DateTime): BOOLEAN;
 (* Parse t, 0X-terminated, as "YYYY-MM-DD", optionally followed by a space
-   or "T" and "HH:MM", ":SS" and ".fff..."; TRUE if it is a valid date or
-   time stamp. *)
+   or "T", "HH:MM", ":SS", ".fff..." and a time zone offset of zero (as a
+   PostgreSQL timestamptz reads in UTC); TRUE if it is a valid date or time
+   stamp. *)
   VAR i, scale: LONGINT;
 BEGIN
   i := 0;
@@ -708,7 +731,8 @@ BEGIN
           INC(d.microsecond, (ORD(t[i]) - ORD("0")) * scale); scale := scale DIV 10; INC(i)
         END
       END
-    END
+    END;
+    IF ~ZeroOffset(t, i) THEN RETURN FALSE END
   END;
   RETURN (t[i] = 0X) & ValidDate(d) & ValidTime(d)
 END ParseDateTime;
@@ -753,8 +777,9 @@ END ColumnBool;
 
 PROCEDURE (s: Statement) ColumnDateTime* (i: INTEGER; VAR d: DateTime);
 (* Parse column i's value, a date or a time stamp in ISO 8601 form, into d.
-   A date alone gives a time of 00:00:00.  NULL gives all fields 0; so does
-   any other value, which also sets errRange. *)
+   A date alone gives a time of 00:00:00.  A time zone offset is accepted
+   only if it is zero.  NULL gives all fields 0; so does any other value,
+   which also sets errRange. *)
   VAR text: ARRAY 64 OF CHAR;
 BEGIN
   ClearDateTime(d);

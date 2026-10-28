@@ -93,6 +93,7 @@ drop: 0 then 0, after Reset 0
 a select changes nothing: ok
 UPDATE ... RETURNING counts once done: ok
 each run counts its own rows: ok
+Reset keeps the parameters: ok
 
 == The connection's Changes
 insert 3: 3

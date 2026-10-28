@@ -419,7 +419,7 @@ BEGIN
 END Changes;
 
 PROCEDURE TestChanges;
-  VAR s: Db.Statement; ok: BOOLEAN;
+  VAR s: Db.Statement; ok: BOOLEAN; rows: HUGEINT;
 BEGIN
   Heading("Changes");
   Changes("insert", "INSERT INTO podb_conformance (id, name) VALUES (70, 'c'), (71, 'c'), (72, 'c')");
@@ -443,10 +443,24 @@ BEGIN
   Prepare("DELETE FROM podb_conformance WHERE id = ?", s);
   s.BindInt(1, 72);
   ok := ~s.Step() & (s.Changes() = 1);
-  s.Reset; s.BindInt(1, 72);
+  s.Reset;
   ok := ok & ~s.Step() & (s.Changes() = 0);
   s.Finalize;
-  Check("each run counts its own rows", ok)
+  Check("each run counts its own rows", ok);
+
+  (* Reset keeps the parameters, so only those that change are bound again *)
+  Prepare("SELECT COUNT(*) FROM podb_conformance WHERE id >= ? AND id <= ?", s);
+  s.BindInt(1, 1); s.BindInt(2, 3);
+  ok := s.Step();
+  rows := s.ColumnInt(0);
+  s.Reset;
+  ok := ok & s.Step() & (s.ColumnInt(0) = rows);
+  s.Reset; s.BindInt(2, 1);
+  ok := ok & s.Step() & (s.ColumnInt(0) <= rows);
+  s.Reset; s.BindNull(1);
+  ok := ok & s.Step() & (s.ColumnInt(0) = 0) & (conn.err = Db.noError);
+  s.Finalize;
+  Check("Reset keeps the parameters", ok)
 END TestChanges;
 
 PROCEDURE ConnectionChanges (label, sql: ARRAY OF CHAR);
@@ -778,14 +792,11 @@ BEGIN
 
   (* stop partway *)
   s.Reset;
-  s.BindInt(1, 250);
   rows := 0;
   WHILE (rows < 20) & s.Step() DO INC(rows) END;
   s.Reset;
-  s.BindInt(1, 250);
   StepAll("reset partway, then all", s);
   s.Reset;
-  s.BindInt(1, 250);
   rows := 0;
   WHILE (rows < 20) & s.Step() DO INC(rows) END;
   s.Finalize;

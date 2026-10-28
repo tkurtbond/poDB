@@ -123,6 +123,8 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
   name avoid the difference.
 - SQL uses `?` or `:name` placeholders, not both in one statement. `Db`
   rewrites them for each database.
+- `Reset` keeps the values bound to the parameters, so bind again only
+  those that change.
 - Every operation sets `conn.err` and `conn.msg`. `Step` returns FALSE both
   when the rows run out and when it fails, so check `conn.err` after a
   stepping loop.
@@ -145,7 +147,9 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
   `TIMESTAMPTZ`), bind a `Db.DateTime` with `BindDate` or `BindDateTime`,
   and read it with `ColumnDateTime`. Values travel as ISO 8601 text
   (`2026-10-28 14:30:05`), which SQLite stores as it is and which sorts in
-  date order. There are no time zones; keep the values in one, such as UTC.
+  date order. `DateTime` has no time zone, so keep the values in UTC. The
+  PostgreSQL driver puts its session in UTC, so a `TIMESTAMPTZ` column
+  works too: it reads in UTC, and a bound time stamp is taken as UTC.
   An invalid date, such as February 30, sets `errRange`.
 - For a large result, prepare the query with `conn.PrepareQuery(sql, rows,
   st)` instead of `conn.Prepare(sql, st)`. The database then reads its rows
@@ -214,9 +218,12 @@ with `conn.err` set to `errRange`.
 
 **Limits.**
 
-- A `timestamptz` reads in the server's time zone with an offset
-  (`+02`), which `ColumnDateTime` does not parse. Use `timestamp`. The
-  driver sets `DateStyle` to `ISO` when it connects.
+- The driver sets `DateStyle` to `ISO` and `TimeZone` to `UTC` when it
+  connects, so the session's SQL works in UTC: `now()` displays in UTC,
+  and `date_trunc('day', ...)` of a `timestamptz` cuts days at UTC
+  midnight. After a `SET TimeZone` of its own, a program's `timestamptz`
+  values read with an offset (`+02`) that `ColumnDateTime` rejects with
+  `errRange`.
 - `ColumnText` of a `bytea` gives PostgreSQL's hex form (`\x...`). Use
   `ColumnBlob`.
 - `BindBlob` sends its bytes in binary format, so its parameter should be a

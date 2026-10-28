@@ -80,7 +80,6 @@ PROCEDURE ["C", "sqlite3_changes64"] ChangesOf (db: SYSTEM.ADDRESS): SYSTEM.INT6
 PROCEDURE ["C", "sqlite3_total_changes64"] TotalChanges (db: SYSTEM.ADDRESS): SYSTEM.INT64;
 PROCEDURE ["C", "sqlite3_step"] StepStatement (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_reset"] ResetStatement (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
-PROCEDURE ["C", "sqlite3_clear_bindings"] ClearBindings (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_finalize"] FinalizeStatement (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_column_count"] ColumnCountOf (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_column_name"] ColumnNameOf (stmt: SYSTEM.ADDRESS;
@@ -327,14 +326,13 @@ BEGIN
 END Step;
 
 PROCEDURE (s: Statement) Reset* ;
-(* Rewind the statement and clear its parameters, so it can be bound and
-   stepped again. *)
+(* Rewind the statement so it can be stepped again.  Its parameters keep
+   their values until they are bound again. *)
   VAR result: SYSTEM.INT32;
 BEGIN
   s.onRow := FALSE; s.changes := 0;
   IF Live(s) THEN
-    result := ResetStatement(s.stmt);   (* repeats the last Step's error, already reported *)
-    result := ClearBindings(s.stmt)
+    result := ResetStatement(s.stmt)   (* repeats the last Step's error, already reported *)
   END
 END Reset;
 

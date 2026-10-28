@@ -227,6 +227,42 @@ mock: step
 mock: finalize
 mock: prepare SELECT
 mock: step
+  [2026-10-28 14:30:05+00] bool=FALSE date=2026/10/28 14:30:5.0  err=0
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30:05.5-00] bool=FALSE date=2026/10/28 14:30:5.500000  err=0
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30+00:00] bool=FALSE date=2026/10/28 14:30:0.0  err=0
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28T14:30:05Z] bool=FALSE date=2026/10/28 14:30:5.0  err=0
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30:05+0000] bool=FALSE date=2026/10/28 14:30:5.0  err=0
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30:05+00:30] bool=FALSE date=0/0/0 0:0:0.0  err=3 msg=not a date or a time stamp
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30:05+0] bool=FALSE date=0/0/0 0:0:0.0  err=3 msg=not a date or a time stamp
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28 14:30:05+00:] bool=FALSE date=0/0/0 0:0:0.0  err=3 msg=not a date or a time stamp
+mock: finalize
+mock: prepare SELECT
+mock: step
+  [2026-10-28+00] bool=FALSE date=0/0/0 0:0:0.0  err=3 msg=not a date or a time stamp
+mock: finalize
+mock: prepare SELECT
+mock: step
   [2026-10-28 14:30:05.] bool=FALSE date=0/0/0 0:0:0.0  err=3 msg=not a date or a time stamp
 mock: finalize
 mock: prepare SELECT

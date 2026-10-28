@@ -501,6 +501,36 @@ What was built:
 - `pg_cursors` lists the unnamed portal of the query that reads it, so the
   test counts only named cursors.
 
+## After Phase 6: `Reset` keeps the parameters; time zones
+
+The user decided these on 2026-10-28, from two items that were listed
+under "Later":
+
+1. **`Reset` keeps the parameters' values.** The design did not say, and
+   the drivers differed: `DbSqlite`'s `Reset` cleared them with
+   `sqlite3_clear_bindings`, while `DbPostgres`'s kept them. Keeping them
+   is the more useful rule, since a program binds again only what changes.
+   `DbSqlite` no longer clears them; the rule is in the design's section
+   2.4, and `Conformance` tests it.
+2. **Time zones: the PostgreSQL session is in UTC.** `DateTime` has no zone
+   field, and stays without one. Before, binding a time stamp to a
+   `timestamptz` was a silent shift: the server took the zoneless text as
+   the session's local time. Reading a `timestamptz` was safe, since its
+   offset made `ColumnDateTime` fail. Now `Open` sets `TimeZone` to `UTC`,
+   as it sets `DateStyle`, and `ColumnDateTime` accepts an offset of zero
+   (`Z`, `+00`, `+00:00`, `+0000`) and rejects any other. So `TIMESTAMP` and
+   `TIMESTAMPTZ` both work for a program whose values are UTC. The cost is
+   that the session's SQL works in UTC (`now()`, `date_trunc` of a
+   `timestamptz`). Not done, but still possible later for a program that
+   must keep the writer's zone: an offset field in `DateTime`, which
+   changes the interface and, on SQLite, keeps text with differing offsets
+   from sorting in time order. Converting to local time would need the zone database, which neither
+   Oberon nor poc's runtime has.
+
+**Done.** `TestDb` checks the offsets `ColumnDateTime` accepts and
+rejects; `TestPostgres` checks the session's zone, a `timestamptz` given
+at `+02`, and a time stamp bound to a `timestamptz`.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
@@ -511,48 +541,6 @@ What was built:
   only when the collector runs, so it cannot replace `Close`. Decide with
   the user how it reports an error, and check with `make check-valgrind`
   that it frees what a forgotten handle holds.
-
-- Time zones. Today there are none: `Db.DateTime` has no zone field, and
-  the documentation says to use `DATE` and `TIMESTAMP` (not `TIMESTAMPTZ`)
-  and keep every value in one zone, such as UTC. What happens at the edges:
-  - Reading a PostgreSQL `timestamptz`: the server sends it in the
-    session's `TimeZone` with an offset (`2026-10-28 14:30:05+02`, or
-    `+05:30`), which `ColumnDateTime` rejects with `errRange`, so a zone is
-    never silently dropped. A program can select `t AT TIME ZONE 'UTC'`,
-    which gives a `timestamp` in UTC.
-  - Binding to a `timestamptz`: `BindDateTime` sends text without an
-    offset, which the server takes as a time in the session's `TimeZone`.
-    That is a silent shift unless the session is in UTC. This is the one
-    case that can go wrong without an error.
-  - SQLite has no zone type. Its date functions take text as UTC and accept
-    an offset suffix, but text with differing offsets no longer sorts in
-    time order.
-  - Converting to or from local time needs the zone database (daylight
-    saving rules), which neither Oberon nor poc's runtime has. That stays
-    out of scope whichever option is chosen.
-
-  Options, smallest first:
-  1. Leave it, as documented now.
-  2. Set the PostgreSQL session's `TimeZone` to `UTC` when connecting, as
-     the driver already does for `DateStyle`, and let `ColumnDateTime`
-     accept a zero offset (`+00`, `Z`). Binding a `timestamptz` is then
-     UTC, reading one gives UTC, and the interface does not change. The
-     cost: it overrides the server's or user's zone for the session, so
-     `now()` displays in UTC and `date_trunc('day', ...)` of a
-     `timestamptz` cuts days at UTC midnight. A program that wants another
-     zone can still `SET TimeZone` itself.
-  3. Add an offset field (minutes east of UTC) to `DateTime`, with a value
-     meaning "no zone". `BindDateTime` would append `+HH:MM`, and
-     `ColumnDateTime` would parse any offset. That changes the public
-     interface, and on SQLite mixed offsets break ordering.
-
-  Option 2 fixes the silent shift at little cost; option 3 is for programs
-  that must keep the writer's zone. Decide with the user.
-- Whether `Reset` keeps a statement's parameters. The design does not say,
-  and the drivers differ: `DbSqlite`'s `Reset` clears them
-  (`sqlite3_clear_bindings`), while `DbPostgres`'s keeps them. The tests
-  bind again after every `Reset`, so they pass on both. Pick one rule,
-  state it in the design's section 2.4 and test it in `Conformance`.
 
 - The BSDs: build and test on cymoril, artos and alerik. The library paths
   are `-link -L/usr/local/lib` on FreeBSD and OpenBSD and `/usr/pkg/lib` on

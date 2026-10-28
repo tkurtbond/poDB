@@ -313,7 +313,7 @@ END Deallocate;
 
 PROCEDURE (d: Driver) Open* (url: ARRAY OF CHAR): Db.Connection;
 (* Connect to the database that url names; see the module's comment. *)
-  VAR c: Connection; result: SYSTEM.ADDRESS; dateStyle: ARRAY 32 OF CHAR;
+  VAR c: Connection; result: SYSTEM.ADDRESS; settings: ARRAY 64 OF CHAR;
 BEGIN
   NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.prepared := 0; c.active := NIL; c.changes := 0;
   c.pg := ConnectDatabase(SYSTEM.ADR(url));
@@ -325,9 +325,11 @@ BEGIN
   END;
   IgnoreNotices(c.pg);
   (* Dates and time stamps come back as ISO 8601, which Db.ColumnDateTime
-     parses, whatever the server's default. *)
-  dateStyle := "SET DateStyle TO ISO";
-  result := Execute(c.pg, SYSTEM.ADR(dateStyle));
+     parses, whatever the server's default.  In UTC, a timestamptz reads with
+     the offset +00, which ColumnDateTime accepts, and a time stamp bound to
+     a timestamptz parameter is taken as UTC instead of the server's zone. *)
+  settings := "SET DateStyle TO ISO; SET TimeZone TO 'UTC'";
+  result := Execute(c.pg, SYSTEM.ADR(settings));
   IF ResultStatus(result) # commandOk THEN
     CopyMessage(ResultError(result), Db.lastError);
     Clear(result); Finish(c.pg);
