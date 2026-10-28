@@ -1,0 +1,111 @@
+
+== Translate
+positional ?: ok [SELECT a FROM t WHERE b = ?1 AND c = ?2] n=2 named=FALSE
+positional $: ok [SELECT a FROM t WHERE b = $1 AND c = $2] n=2 named=FALSE
+named: ok [UPDATE t SET a = ?1 WHERE id = ?2] n=2 named=TRUE names=a,id
+repeated name: ok [SELECT $1 + $2 + $1] n=2 named=TRUE names=x,y_2
+no parameters: ok [SELECT 1] n=0 named=FALSE
+cast: ok [SELECT a::int, $1::text FROM t] n=1 named=TRUE names=v
+quotes: ok [SELECT ':no', '?', "a?b", ':x''s' WHERE a = ?1] n=1 named=TRUE names=yes
+line comment: ok [SELECT ?1 -- what :is ? this
+  , ?2] n=2 named=TRUE names=a,b
+block comment: ok [SELECT /* :a ? */ ?1] n=1 named=FALSE
+unterminated: ok [SELECT 'abc] n=0 named=FALSE
+mixed: FALSE
+64 parameters: ok [SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46,?47,?48,?49,?50,?51,?52,?53,?54,?55,?56,?57,?58,?59,?60,?61,?62,?63,?64] n=64 named=FALSE
+65 parameters: FALSE
+31-character name: ok [SELECT ?1] n=1 named=TRUE names=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+32-character name: FALSE
+output fits exactly: ok [SELECT ?1] n=1 named=FALSE
+output one too small: FALSE
+35008 characters: ok, ends [ $1] n=1 named=FALSE
+
+== Open
+Open(nocolon) = FALSE conn # NIL: FALSE lastError=[Db.Open: connection URL has no scheme]
+Open(:memory:) = FALSE conn # NIL: FALSE lastError=[Db.Open: connection URL has no scheme]
+Open() = FALSE conn # NIL: FALSE lastError=[Db.Open: connection URL has no scheme]
+Open(nosuch:x) = FALSE conn # NIL: FALSE lastError=[Db.Open: no driver registered for scheme (is the driver module imported?)]
+Open(abcdefghijklmnopqrstuvwxyz012345:x) = FALSE conn # NIL: FALSE lastError=[Db.Open: no driver registered for scheme (is the driver module imported?)]
+Open(abcdefghijklmnopqrstuvwxyz01234:x) = FALSE conn # NIL: FALSE lastError=[Db.Open: no driver registered for scheme (is the driver module imported?)]
+Open(mock:fail) = FALSE conn # NIL: FALSE lastError=[mock: cannot open]
+Open(mock:silent) = FALSE conn # NIL: FALSE lastError=[Db.Open: the driver could not open the connection]
+other: open other:y
+Open(other:y) = FALSE conn # NIL: FALSE lastError=[other: refused]
+mock: open mock:ok
+Open(mock:ok) = TRUE conn # NIL: TRUE lastError=[]
+mock: close
+mock: open mock:test
+
+== Binding by name
+mock: prepare SELECT * FROM t WHERE a = ?1 AND b = ?2 OR c = ?1
+prepare: TRUE  err=0
+ParamIndex a=1 b=2 zz=0
+mock: bind int 1 = 40
+  err=0
+mock: bind int 2 = 9223372036854775807
+  err=0
+mock: bind int 2 = -9223372036854775808
+  err=0
+mock: bind text 2 = Ada
+  err=0
+mock: bind real 1 = 1500/1000
+  err=0
+mock: bind null 2
+  err=0
+  err=3 msg=no such parameter name
+  err=3 msg=no such parameter name
+mock: finalize
+mock: prepare SELECT ?1 + ?2
+positional prepare: TRUE  err=0
+mock: bind int 2 = 7
+  err=0
+  err=3 msg=mock: no such parameter
+  err=3 msg=no such parameter name
+mock: finalize
+mixed prepare: FALSE st = NIL: TRUE  err=2 msg=mock: bad placeholders
+
+== Columns by name
+mock: prepare SELECT
+ColumnCount=4
+ColumnIndex id=0 NAME=1 63 chars=3 nope=-1
+mock: step
+  id=1 name=[Ada] type=3 last=-5
+  missing int=0  err=3 msg=no such column name
+  missing text=[]  err=3 msg=no such column name
+  missing type=0  err=3 msg=no such column name
+  name in 3 characters=[Ad]
+mock: step
+  id=2 name=[] type=0 last=0
+  missing int=0  err=3 msg=no such column name
+  missing text=[]  err=3 msg=no such column name
+  missing type=0  err=3 msg=no such column name
+  name in 3 characters=[]
+mock: step
+  err=0
+mock: finalize
+
+== Exec and transactions
+Begin: mock: prepare BEGIN
+mock: step
+mock: finalize
+TRUE  err=0
+Commit: mock: prepare COMMIT
+mock: step
+mock: finalize
+TRUE  err=0
+Rollback: mock: prepare ROLLBACK
+mock: step
+mock: finalize
+TRUE  err=0
+Exec FAIL: mock: prepare FAIL
+FALSE  err=2 msg=mock: prepare failed
+Exec STEPFAIL: mock: prepare STEPFAIL
+mock: step
+mock: finalize
+FALSE  err=2 msg=mock: step failed
+Exec bad placeholders: FALSE  err=2 msg=mock: bad placeholders
+mock: prepare CREATE TABLE t (a INTEGER)
+mock: step
+mock: finalize
+Exec CREATE: TRUE  err=0
+mock: close

@@ -55,6 +55,7 @@ CONST
 
   maxParams = 64;
   maxName = 32;
+  maxColumnName = 128;   (* PostgreSQL's limit is 63 bytes *)
 
 TYPE
   Message* = ARRAY 256 OF CHAR;
@@ -117,12 +118,12 @@ BEGIN
   IF i < p.n THEN RETURN i + 1 ELSE RETURN 0 END
 END IndexOf;
 
-PROCEDURE Put (VAR out: ARRAY OF CHAR; VAR o: INTEGER; c: CHAR; VAR ok: BOOLEAN);
+PROCEDURE Put (VAR out: ARRAY OF CHAR; VAR o: LONGINT; c: CHAR; VAR ok: BOOLEAN);
 BEGIN
   IF ok & (o < LEN(out) - 1) THEN out[o] := c; INC(o) ELSE ok := FALSE END
 END Put;
 
-PROCEDURE PutIndex (VAR out: ARRAY OF CHAR; VAR o: INTEGER; prefix: CHAR; n: INTEGER;
+PROCEDURE PutIndex (VAR out: ARRAY OF CHAR; VAR o: LONGINT; prefix: CHAR; n: INTEGER;
                     VAR ok: BOOLEAN);
   VAR digits: ARRAY 8 OF CHAR; k: INTEGER;
 BEGIN
@@ -145,7 +146,7 @@ PROCEDURE Translate* (sql: ARRAY OF CHAR; prefix: CHAR; VAR out: ARRAY OF CHAR;
    unchanged, and :: (a PostgreSQL cast) is not taken for a parameter.
    Not handled: PostgreSQL dollar-quoted strings; PostgreSQL operators that
    contain a question mark. *)
-  VAR i, o, k, idx: INTEGER; c, q: CHAR; name: ARRAY maxName OF CHAR;
+  VAR i, o: LONGINT; k, idx: INTEGER; c, q: CHAR; name: ARRAY maxName OF CHAR;
       ok, named, positional: BOOLEAN;
 BEGIN
   p.n := 0; p.named := FALSE;
@@ -229,6 +230,9 @@ END Register;
 
 (* ---- Connection ---- *)
 
+PROCEDURE ^ (s: Statement) Step* (): BOOLEAN;
+PROCEDURE ^ (s: Statement) Finalize* ;
+
 PROCEDURE (c: Connection) Close* ;
 (* abstract *)
 END Close;
@@ -271,7 +275,7 @@ END Rollback;
 PROCEDURE (s: Statement) BindNull* (i: INTEGER);
 END BindNull;
 
-PROCEDURE (s: Statement) BindInt* (i: INTEGER; v: LONGINT);
+PROCEDURE (s: Statement) BindInt* (i: INTEGER; v: HUGEINT);
 END BindInt;
 
 PROCEDURE (s: Statement) BindReal* (i: INTEGER; v: LONGREAL);
@@ -297,7 +301,7 @@ BEGIN
   IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindNull(i) END
 END BindNullByName;
 
-PROCEDURE (s: Statement) BindIntByName* (name: ARRAY OF CHAR; v: LONGINT);
+PROCEDURE (s: Statement) BindIntByName* (name: ARRAY OF CHAR; v: HUGEINT);
   VAR i: INTEGER;
 BEGIN
   i := IndexOf(s.params, name);
@@ -349,7 +353,7 @@ BEGIN
   RETURN typeNull
 END ColumnType;
 
-PROCEDURE (s: Statement) ColumnInt* (i: INTEGER): LONGINT;
+PROCEDURE (s: Statement) ColumnInt* (i: INTEGER): HUGEINT;
 BEGIN
   RETURN 0
 END ColumnInt;
@@ -378,7 +382,7 @@ END Lower;
 
 PROCEDURE SameName (a, b: ARRAY OF CHAR): BOOLEAN;
 (* case-insensitive comparison of two zero-terminated strings *)
-  VAR i: INTEGER;
+  VAR i: LONGINT;
 BEGIN
   i := 0;
   WHILE (i < LEN(a)) & (i < LEN(b)) & (a[i] # 0X) & (Lower(a[i]) = Lower(b[i])) DO INC(i) END;
@@ -387,7 +391,7 @@ END SameName;
 
 PROCEDURE (s: Statement) ColumnIndex* (name: ARRAY OF CHAR): INTEGER;
 (* 0-based column number for name (case-insensitive, first match), or -1. *)
-  VAR i, n: INTEGER; cname: ARRAY 64 OF CHAR;
+  VAR i, n: INTEGER; cname: ARRAY maxColumnName OF CHAR;
 BEGIN
   n := s.ColumnCount();
   i := 0;
@@ -407,7 +411,7 @@ BEGIN
   RETURN s.ColumnType(i)
 END ColumnTypeByName;
 
-PROCEDURE (s: Statement) ColumnIntByName* (name: ARRAY OF CHAR): LONGINT;
+PROCEDURE (s: Statement) ColumnIntByName* (name: ARRAY OF CHAR): HUGEINT;
   VAR i: INTEGER;
 BEGIN
   i := s.ColumnIndex(name);
@@ -436,19 +440,23 @@ END ColumnTextByName;
 (* ---- Opening ---- *)
 
 PROCEDURE Open* (url: ARRAY OF CHAR; VAR conn: Connection): BOOLEAN;
-  VAR i: INTEGER; scheme: ARRAY 32 OF CHAR; d: Driver;
+(* Open a connection with the driver registered for url's scheme.  On
+   failure conn is NIL and lastError says why; on success lastError is "". *)
+  VAR i: LONGINT; scheme: ARRAY 32 OF CHAR; d: Driver;
 BEGIN
   conn := NIL;
+  lastError[0] := 0X;
   i := 0;
-  WHILE (i < LEN(url) - 1) & (i < LEN(scheme) - 1) & (url[i] # 0X) & (url[i] # ":") DO
-    scheme[i] := url[i];
-    INC(i)
-  END;
-  scheme[i] := 0X;
-  IF url[i] # ":" THEN
+  WHILE (i < LEN(url)) & (url[i] # 0X) & (url[i] # ":") DO INC(i) END;
+  IF (i >= LEN(url)) OR (url[i] # ":") OR (i = 0) THEN
     lastError := "Db.Open: connection URL has no scheme";
     RETURN FALSE
+  ELSIF i >= LEN(scheme) THEN
+    lastError := "Db.Open: no driver registered for scheme (is the driver module imported?)";
+    RETURN FALSE
   END;
+  scheme[i] := 0X;
+  WHILE i > 0 DO DEC(i); scheme[i] := url[i] END;
   d := drivers;
   WHILE (d # NIL) & (d.scheme # scheme) DO d := d.next END;
   IF d = NIL THEN
@@ -456,6 +464,9 @@ BEGIN
     RETURN FALSE
   END;
   conn := d.Open(url);
+  IF (conn = NIL) & (lastError[0] = 0X) THEN
+    lastError := "Db.Open: the driver could not open the connection"
+  END;
   RETURN conn # NIL
 END Open;
 

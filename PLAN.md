@@ -100,7 +100,8 @@ The user decided all of them on 2026-10-27.
 1. Fix `src/Db.Mod`: add the forward declarations, carry out D1 (the
    `LONGINT` values become `HUGEINT`), and fix problems 2-5 above.
 2. Write `src/DbCStrings.Mod`, the shared C-string helpers:
-   - `Length(p: SYSTEM.ADDRESS): LONGINT`, through `strlen`.
+   - `Length(p: SYSTEM.ADDRESS): SYSTEM.ADDRESS`, through `strlen` (a
+     `size_t`, so `ADDRESS` rather than `LONGINT`).
    - `Copy(p: SYSTEM.ADDRESS; VAR out: ARRAY OF CHAR)`: truncates to fit,
      always ends with 0X, and treats NIL as "".
    - `Fits(p; VAR out): BOOLEAN`, so a caller can find out that a value was
@@ -123,7 +124,21 @@ The user decided all of them on 2026-10-27.
      duplicate names, an unknown name, and a 63-character name.
    - **`Exec`, `Begin`, `Commit` and `Rollback`**, through the mock driver.
 
+5. Build the `db` library (D3) under both models in `build/lib`, and build
+   the tests against it rather than against `src/`.
+
 **Done when** `TestDb` passes under both models.
+
+**Done.** Learned on the way:
+- Oberon-2 strings cannot contain their own quote character or a control
+  character, and there is no string concatenation, so `TestDb` spells such
+  SQL with stand-in characters (`Spell`).
+- A count such as 35000 does not fit an `INTEGER` under `-O2`; test helpers
+  that build long strings take `LONGINT` counts.
+- `poc -library` writes the library to `<triple>/<model>/` under the current
+  directory, so the makefile runs it in `build/lib`, and `-library-path
+  build/lib` finds both models. A test program that imports `Db` takes it
+  from the library, not from `src/`.
 
 ## Phase 2: `DbSqlite`
 
