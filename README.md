@@ -147,6 +147,12 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
   (`2026-10-28 14:30:05`), which SQLite stores as it is and which sorts in
   date order. There are no time zones; keep the values in one, such as UTC.
   An invalid date, such as February 30, sets `errRange`.
+- For a large result, prepare the query with `conn.PrepareQuery(sql, rows,
+  st)` instead of `conn.Prepare(sql, st)`. The database then reads its rows
+  `rows` at a time, other statements can run while it is stepped, and
+  stopping early costs nothing. Step it only between `conn.Begin()` and
+  `conn.Commit()` (or `Rollback()`). On PostgreSQL its rows come from a
+  cursor, which the end of the transaction closes.
 
 ## The SQLite driver
 
@@ -220,10 +226,15 @@ with `conn.err` set to `errRange`.
 - A query's rows arrive in chunks of 100, and `Step` holds one chunk at a
   time. But while they arrive the connection can do nothing else, so a
   statement run inside a loop over another's rows makes the driver read
-  the rest of the outer result into memory. For a very large result, run
-  the inner statements on a second connection.
-- `Reset` or `Finalize` partway through a result reads and discards the
-  rest of it.
+  the rest of the outer result into memory. For a very large result, use
+  `PrepareQuery`, or run the inner statements on a second connection.
+- `Reset` or `Finalize` partway through a `Prepare`d statement's result
+  reads and discards the rest of it. A `PrepareQuery` statement's are
+  free.
+- `PrepareQuery` takes only a query, a `SELECT` or `VALUES`: an
+  `INSERT ... RETURNING` fails when it is prepared. Stepped outside a
+  transaction it fails with `errSql`. After the transaction ends, it gives
+  the rest of the batch it holds, then fails.
 - A query that fails partway gives the rows before the error, then the
   error, as on SQLite.
 - The server's notices, such as `DROP TABLE IF EXISTS`'s "skipping", are

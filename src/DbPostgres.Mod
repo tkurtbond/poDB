@@ -13,16 +13,26 @@ MODULE DbPostgres;
    column's text.  The one exception is BindBlob, which sends its bytes in
    binary format, for a bytea parameter; ColumnBlob unescapes a bytea
    column's text.  ColumnType gives typeInt for int2, int4 and int8,
-   typeReal for float4, float8 and numeric, typeBlob for bytea, and
-   typeText for every other type, bool included.  The server's notices are
-   not printed.
+   typeReal for float4, float8 and numeric, typeBlob for bytea, typeInt
+   for bool (whose "t" and "f" read as 1 and 0), and typeText for every
+   other type.  The server's notices are not printed.
 
    A query's rows arrive in chunks of chunkRows (libpq's chunked rows
    mode), so Step holds one chunk at a time, not the whole result.  While
    a statement's rows are arriving, its connection can run nothing else.
    So before another command goes to the server, Drain reads the rest of
    that statement's results and queues them in the statement, which then
-   steps through them from memory. *)
+   steps through them from memory.
+
+   PrepareQuery avoids that for a large result.  Besides the query itself,
+   whose description gives the columns before the first Step, it prepares
+   "DECLARE podb_cursor_<n> NO SCROLL CURSOR FOR <query>".  The first Step
+   executes that, opening the cursor, and each Step that runs out of rows
+   runs "FETCH <rows> FROM podb_cursor_<n>", which finishes before
+   anything else goes to the server.  A cursor lives only until its
+   transaction ends.  Reset, Finalize and the last FETCH close it with
+   PQclosePortal, a protocol message that, like PQclosePrepared, works in a
+   failed transaction and does nothing if the cursor is already gone. *)
 
 IMPORT SYSTEM, Db, DbCStrings;
 
@@ -48,6 +58,7 @@ CONST
   maxStatementName = 32;
   numberSize = 32;   (* holds a HUGEINT, or a LONGREAL to 17 digits *)
   chunkRows = 100;   (* the rows in each chunk of a result *)
+  fetchSize = 64;    (* holds "FETCH <rows> FROM podb_cursor_<n>" *)
 
 TYPE
   Text = POINTER TO ARRAY OF CHAR;
@@ -84,7 +95,12 @@ TYPE
     value: Values;              (* value[i] is parameter i+1 as text; NIL is NULL *)
     address: Addresses;         (* the addresses of value's texts, for libpq *)
     length: Int32s;             (* length[i] is value[i]'s length in bytes, if it is binary *)
-    format: Int32s              (* format[i] is textFormat or binaryFormat *)
+    format: Int32s;             (* format[i] is textFormat or binaryFormat *)
+    batch: LONGINT;             (* the rows each FETCH reads, or 0 if it is not a cursor's query *)
+    declareName: StatementName;   (* the prepared DECLARE's name, if batch > 0 *)
+    cursorName: StatementName;  (* the cursor's name, if batch > 0 *)
+    fetch: ARRAY fetchSize OF CHAR;   (* the FETCH command, if batch > 0 *)
+    open: BOOLEAN               (* the cursor is open on the server *)
   END;
 
   Driver = POINTER TO DriverDesc;
@@ -109,8 +125,12 @@ PROCEDURE ["C", "PQsendQueryPrepared"] SendPrepared (conn, name: SYSTEM.ADDRESS;
     resultFormat: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "PQsetChunkedRowsMode"] SetChunkedRows (conn: SYSTEM.ADDRESS; chunkSize: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "PQgetResult"] GetResult (conn: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQexecPrepared"] ExecutePrepared (conn, name: SYSTEM.ADDRESS;
+    nParams: SYSTEM.INT32; paramValues, paramLengths, paramFormats: SYSTEM.ADDRESS;
+    resultFormat: SYSTEM.INT32): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQexec"] Execute (conn, query: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQclosePrepared"] ClosePrepared (conn, name: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQclosePortal"] ClosePortal (conn, name: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQresultStatus"] ResultStatus (result: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "PQresultErrorMessage"] ResultError (result: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQclear"] Clear (result: SYSTEM.ADDRESS);
@@ -198,15 +218,28 @@ BEGIN
   RETURN n
 END ChangesOf;
 
-PROCEDURE MakeName (n: LONGINT; VAR name: StatementName);
-(* name := "podb_" followed by n in decimal; n > 0 *)
-  VAR digits: ARRAY 24 OF CHAR; k, i: LONGINT;
+PROCEDURE Append (VAR out: ARRAY OF CHAR; VAR i: LONGINT; s: ARRAY OF CHAR);
+(* Put s, up to its 0X, into out at i and advance i past it; out has room. *)
+  VAR k: LONGINT;
+BEGIN
+  k := 0;
+  WHILE s[k] # 0X DO out[i] := s[k]; INC(i); INC(k) END
+END Append;
+
+PROCEDURE AppendNumber (VAR out: ARRAY OF CHAR; VAR i: LONGINT; n: LONGINT);
+(* Put n >= 0 in decimal into out at i and advance i past it. *)
+  VAR digits: ARRAY 24 OF CHAR; k: LONGINT;
 BEGIN
   k := 0;
   REPEAT digits[k] := CHR(ORD("0") + n MOD 10); n := n DIV 10; INC(k) UNTIL n = 0;
-  name := "podb_"; i := 5;
-  WHILE k > 0 DO DEC(k); name[i] := digits[k]; INC(i) END;
-  name[i] := 0X
+  WHILE k > 0 DO DEC(k); out[i] := digits[k]; INC(i) END
+END AppendNumber;
+
+PROCEDURE MakeName (prefix: ARRAY OF CHAR; n: LONGINT; VAR name: StatementName);
+(* name := prefix followed by n in decimal, as "podb_12" *)
+  VAR i: LONGINT;
+BEGIN
+  i := 0; Append(name, i, prefix); AppendNumber(name, i, n); name[i] := 0X
 END MakeName;
 
 PROCEDURE Drain (c: Connection);
@@ -254,6 +287,17 @@ BEGIN
   result := NextResult(s);
   WHILE result # 0 DO Clear(result); result := NextResult(s) END
 END Discard;
+
+PROCEDURE CloseCursor (s: Statement);
+(* Close s's cursor on the server if it is open. *)
+  VAR c: Connection;
+BEGIN
+  IF s.open THEN
+    s.open := FALSE;
+    c := s.conn(Connection);
+    IF c.pg # 0 THEN Drain(c); Clear(ClosePortal(c.pg, SYSTEM.ADR(s.cursorName))) END
+  END
+END CloseCursor;
 
 PROCEDURE Deallocate (c: Connection; name: StatementName);
 (* Drop the prepared statement name on c's server.  PQclosePrepared does
@@ -303,11 +347,12 @@ BEGIN
   IF c.pg # 0 THEN Finish(c.pg); c.pg := 0; c.active := NIL END
 END Close;
 
-PROCEDURE (c: Connection) Prepare* (sql: ARRAY OF CHAR; VAR s: Db.Statement): BOOLEAN;
-(* Translate sql's placeholders to $1, $2 ... and prepare it on the server. *)
-  VAR st: Statement; translated: Text; result: SYSTEM.ADDRESS; n: INTEGER;
+PROCEDURE PrepareOn (c: Connection; sql: ARRAY OF CHAR; batch: LONGINT; VAR s: Db.Statement): BOOLEAN;
+(* Translate sql's placeholders to $1, $2 ... and prepare it on the server.
+   If batch > 0, prepare a DECLARE of a cursor for it as well, whose rows
+   Step fetches batch at a time. *)
+  VAR st: Statement; translated, declare: Text; result: SYSTEM.ADDRESS; n: INTEGER; i: LONGINT;
 BEGIN
-  c.err := Db.noError;
   s := NIL;
   IF c.pg = 0 THEN Db.SetError(c, Db.errSql, "DbPostgres: the connection is closed"); RETURN FALSE END;
   NEW(st);
@@ -320,7 +365,7 @@ BEGIN
   END;
   Drain(c);
   INC(c.prepared);
-  MakeName(c.prepared, st.name);
+  MakeName("podb_", c.prepared, st.name);
   result := PrepareStatement(c.pg, SYSTEM.ADR(st.name), SYSTEM.ADR(translated[0]), st.params.n, 0);
   IF ResultStatus(result) # commandOk THEN
     SetResultError(c, result); Clear(result); RETURN FALSE
@@ -336,6 +381,22 @@ BEGIN
     Db.SetError(c, Db.errSql, "DbPostgres: the statement has placeholders that Db does not translate");
     RETURN FALSE
   END;
+  st.batch := batch; st.open := FALSE;
+  IF batch > 0 THEN
+    MakeName("podb_declare_", c.prepared, st.declareName);
+    MakeName("podb_cursor_", c.prepared, st.cursorName);
+    NEW(declare, LEN(translated^) + 64);
+    i := 0; Append(declare^, i, "DECLARE "); Append(declare^, i, st.cursorName);
+    Append(declare^, i, " NO SCROLL CURSOR FOR "); Append(declare^, i, translated^); declare[i] := 0X;
+    result := PrepareStatement(c.pg, SYSTEM.ADR(st.declareName), SYSTEM.ADR(declare[0]), st.params.n, 0);
+    IF ResultStatus(result) # commandOk THEN
+      SetResultError(c, result); Clear(result);
+      Clear(st.description); Deallocate(c, st.name); RETURN FALSE
+    END;
+    Clear(result);
+    i := 0; Append(st.fetch, i, "FETCH "); AppendNumber(st.fetch, i, batch);
+    Append(st.fetch, i, " FROM "); Append(st.fetch, i, st.cursorName); st.fetch[i] := 0X
+  END;
   n := st.params.n;
   IF n = 0 THEN n := 1 END;   (* so that address[0] exists *)
   NEW(st.value, n); NEW(st.address, n); NEW(st.length, n); NEW(st.format, n);
@@ -344,7 +405,25 @@ BEGIN
   st.conn := c;
   s := st;
   RETURN TRUE
+END PrepareOn;
+
+PROCEDURE (c: Connection) Prepare* (sql: ARRAY OF CHAR; VAR s: Db.Statement): BOOLEAN;
+(* Translate sql's placeholders to $1, $2 ... and prepare it on the server. *)
+BEGIN
+  c.err := Db.noError;
+  RETURN PrepareOn(c, sql, 0, s)
 END Prepare;
+
+PROCEDURE (c: Connection) PrepareQuery* (sql: ARRAY OF CHAR; rows: LONGINT; VAR s: Db.Statement): BOOLEAN;
+(* Prepare the query sql and a cursor for it, whose rows Step fetches rows
+   at a time; see the module's comment.  Step it only in a transaction. *)
+BEGIN
+  c.err := Db.noError;
+  IF rows < 1 THEN
+    s := NIL; Db.SetError(c, Db.errRange, "DbPostgres: PrepareQuery needs at least 1 row at a time"); RETURN FALSE
+  END;
+  RETURN PrepareOn(c, sql, rows, s)
+END PrepareQuery;
 
 PROCEDURE (c: Connection) Changes* (): HUGEINT;
 (* The rows changed by the last statement whose Step returned FALSE at the
@@ -437,16 +516,23 @@ END BindBlob;
 
 (* ---- Statement: stepping ---- *)
 
+PROCEDURE SetAddresses (s: Statement);
+(* Point s.address at s's parameter values, for libpq. *)
+  VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO s.params.n - 1 DO
+    IF s.value[i] = NIL THEN s.address[i] := 0 ELSE s.address[i] := SYSTEM.ADR(s.value[i][0]) END
+  END
+END SetAddresses;
+
 PROCEDURE Run (s: Statement);
 (* Send s, with its current parameters, to the server, and make it c's
    active statement; its results are read as Step needs them. *)
-  VAR c: Connection; i: INTEGER;
+  VAR c: Connection;
 BEGIN
   c := s.conn(Connection);
   Drain(c);
-  FOR i := 0 TO s.params.n - 1 DO
-    IF s.value[i] = NIL THEN s.address[i] := 0 ELSE s.address[i] := SYSTEM.ADR(s.value[i][0]) END
-  END;
+  SetAddresses(s);
   s.executed := TRUE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0;
   IF SendPrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]),
       SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat) = 0 THEN
@@ -495,17 +581,56 @@ BEGIN
   END
 END ReadResult;
 
+PROCEDURE Declare (s: Statement);
+(* Open s's cursor, with s's current parameters. *)
+  VAR c: Connection; result: SYSTEM.ADDRESS;
+BEGIN
+  c := s.conn(Connection);
+  Drain(c);
+  SetAddresses(s);
+  s.executed := TRUE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0;
+  result := ExecutePrepared(c.pg, SYSTEM.ADR(s.declareName), s.params.n, SYSTEM.ADR(s.address[0]),
+    SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat);
+  IF ResultStatus(result) = commandOk THEN s.open := TRUE
+  ELSE SetResultError(c, result); s.done := TRUE; c.changes := 0
+  END;
+  Clear(result)
+END Declare;
+
+PROCEDURE Fetch (s: Statement);
+(* Replace s.result with the cursor's next batch of rows, leaving s on the
+   row before its first.  A batch short of s.batch rows is the last, and
+   closes the cursor. *)
+  VAR c: Connection; result: SYSTEM.ADDRESS; rows: LONGINT;
+BEGIN
+  c := s.conn(Connection);
+  Clear(s.result); s.result := 0; s.row := -1; s.rows := 0;
+  Drain(c);
+  result := Execute(c.pg, SYSTEM.ADR(s.fetch));
+  IF ResultStatus(result) = tuplesOk THEN
+    s.result := result; s.rows := RowCount(result);
+    rows := s.rows;
+    IF rows < s.batch THEN s.done := TRUE; c.changes := 0; CloseCursor(s) END
+  ELSE
+    SetResultError(c, result); Clear(result);
+    s.done := TRUE; c.changes := 0; CloseCursor(s)
+  END
+END Fetch;
+
 PROCEDURE (s: Statement) Step* (): BOOLEAN;
 (* Advance to the next row: TRUE if there is one, FALSE when the statement
    is done or has failed (then s.conn.err says which).  The first Step after
-   Prepare or Reset sends the statement to the server; a Step that runs off
-   the end of a chunk of rows reads the next. *)
+   Prepare or Reset sends the statement to the server (or opens its cursor);
+   a Step that runs off the end of a chunk of rows reads (or fetches) the
+   next. *)
 BEGIN
   IF ~Live(s) THEN RETURN FALSE END;
-  IF ~s.executed THEN Run(s) END;
+  IF ~s.executed THEN
+    IF s.batch > 0 THEN Declare(s) ELSE Run(s) END
+  END;
   IF s.row < s.rows THEN INC(s.row) END;
   WHILE (s.row >= s.rows) & ~s.done & (s.conn.err = Db.noError) DO
-    ReadResult(s);
+    IF s.batch > 0 THEN Fetch(s) ELSE ReadResult(s) END;
     IF s.row < s.rows THEN INC(s.row) END
   END;
   RETURN s.row < s.rows
@@ -516,7 +641,7 @@ PROCEDURE (s: Statement) Reset* ;
    their values until they are bound again. *)
 BEGIN
   IF Live(s) THEN
-    Discard(s);
+    Discard(s); CloseCursor(s);
     s.executed := FALSE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0
   END
 END Reset;
@@ -527,11 +652,12 @@ PROCEDURE (s: Statement) Finalize* ;
    reported after it. *)
 BEGIN
   IF s.description # 0 THEN
-    Discard(s);
+    Discard(s); CloseCursor(s);
     Clear(s.description); s.description := 0;
     s.executed := FALSE; s.done := FALSE; s.row := -1; s.rows := 0;
     s.value := NIL; s.address := NIL; s.length := NIL; s.format := NIL;
-    Deallocate(s.conn(Connection), s.name)
+    Deallocate(s.conn(Connection), s.name);
+    IF s.batch > 0 THEN Deallocate(s.conn(Connection), s.declareName) END
   END
 END Finalize;
 

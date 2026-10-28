@@ -136,6 +136,11 @@ mock: step
 mock: step
 mock: finalize
 Exec SELECT: TRUE  err=0
+PrepareQuery of 0 rows: FALSE  err=3 msg=PrepareQuery needs at least 1 row at a time
+and no statement: TRUE
+mock: prepare SELECT
+PrepareQuery of 10 rows: TRUE  err=0
+mock: finalize
 
 == Booleans, dates and times
 mock: prepare SELECT ?1, ?2

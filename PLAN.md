@@ -442,90 +442,64 @@ The user approved these on 2026-10-28:
   drops trailing zeros (`14:30:05.5`), and rejects a time zone offset, so
   a `timestamptz` is an error instead of a silently shifted time.
 
-## Proposed, for review: scanning a large result with a cursor
+## After Phase 6: scanning a large result with a cursor
 
-Not implemented. The problem: the PostgreSQL driver streams a result in
-chunks only while nothing else runs on the connection. A statement run
-inside the loop makes the driver read the rest of the outer result into
-memory, and `Reset` or `Finalize` partway reads the rest and discards it.
-SQLite has neither problem, since `sqlite3_step` computes each row as it is
-asked for and statements interleave freely.
+The problem: the PostgreSQL driver streams a result in chunks only while
+nothing else runs on the connection. A statement run inside the loop makes
+the driver read the rest of the outer result into memory, and `Reset` or
+`Finalize` partway reads the rest and discards it. SQLite has neither
+problem, since `sqlite3_step` computes each row as it is asked for.
 
-A server-side cursor fixes both. The PostgreSQL pattern is:
+A server-side cursor fixes both:
 
 ```sql
 BEGIN;
 DECLARE podb_cursor_1 NO SCROLL CURSOR FOR SELECT ... $1 ...;
 FETCH 100 FROM podb_cursor_1;   -- repeated until it gives fewer than 100 rows
-CLOSE podb_cursor_1;
 COMMIT;
 ```
 
-Each `FETCH` is a complete command whose result is at most 100 rows, so
-between `FETCH`es the connection is free for other statements, and
-stopping early is one `CLOSE`, with nothing to read.
+Each `FETCH` is a complete command, so between them the connection is free,
+and stopping early reads nothing more. SQLite has no `DECLARE` or `FETCH`,
+so `Db` hides them behind one procedure. The user decided on 2026-10-28:
 
-A program could write this SQL itself, but SQLite has no `DECLARE` or
-`FETCH`, so the program would no longer run on both. The proposal is
-instead one new procedure in `Db`:
+1. The name is `PrepareQuery`.
+2. It takes the rows per `FETCH` as a parameter:
+   `conn.PrepareQuery(sql, rows, VAR s)`; `rows` < 1 sets `errRange`.
+3. `ColumnCount` and `ColumnName` work before the first `Step`, as after
+   `Prepare`, so the driver prepares the plain query as well as the
+   `DECLARE`.
 
-```oberon
-PROCEDURE (c: Connection) PrepareQuery* (sql: ARRAY OF CHAR; VAR s: Statement): BOOLEAN;
-(* Prepare a query whose rows are read a few at a time on the server, so
-   that other statements can run while it is stepped, and Reset or
-   Finalize partway costs nothing.  sql must be a SELECT or VALUES.  Step
-   it only inside a transaction (Begin ... Commit or Rollback); the
-   transaction's end ends the scan. *)
-```
+What was built:
 
-- The statement it returns is an ordinary `Statement`: the same binding,
-  `Step`, column readers and `Finalize`. Only how the rows arrive differs.
-- **In `Db`** it is not abstract: the default calls `c.Prepare`. That is
-  all SQLite needs, so `DbSqlite` and `MockDriver` do not change, and a
-  program can use `PrepareQuery` on both databases.
-- **In `DbPostgres`** it overrides the default:
-  - `Prepare` translates the SQL, then prepares two statements: the query
-    itself, only to describe it (`PQdescribePrepared` of a `DECLARE` has
-    no columns, so `ColumnCount` and `ColumnName` before the first `Step`
-    need the plain query), and `DECLARE podb_cursor_<n> NO SCROLL CURSOR
-    FOR <query>` with the same `$n` parameters. A probe on libpq 18 and
-    PostgreSQL 18 confirmed that a prepared `DECLARE` takes parameters.
-    Preparing the plain query also reports bad SQL at `Prepare`, as for
-    any statement. The second could instead be prepared lazily.
-  - The first `Step` runs the `DECLARE` with the bound parameters, then
-    `FETCH 100`. Later `Step`s move through the rows, and the one after
-    the last row `FETCH`es again, unless the last `FETCH` gave fewer than
-    100 rows. Each `FETCH` is read whole, without chunked mode, so it
-    never leaves the connection busy; before it runs, `Drain` still
-    finishes any other statement's chunked result, as now.
-  - `Reset` and `Finalize` send `CLOSE podb_cursor_<n>` if the cursor is
-    open, ignoring a failure (in a failed transaction, or after its end,
-    the cursor is already gone). `Finalize` also deallocates both
-    prepared statements.
-  - `Changes` is 0, since a cursor's query changes nothing.
-- **Errors.** Outside a transaction, the server refuses the `DECLARE`
-  ("DECLARE CURSOR can only be used in transaction blocks"), and `Step`
-  returns FALSE with `errSql`. After `Commit` or `Rollback` the next
-  `FETCH` fails with "cursor does not exist", also `errSql`. A `WITH HOLD`
-  cursor would survive the commit, but the server computes its whole
-  result at the commit, which is what this is meant to avoid.
-- **Cost.** One round trip per 100 rows, where a chunked result streams
-  without waiting. So `Prepare` stays the default, and `PrepareQuery` is
-  for results too big to hold, or loops that run other statements.
+- **`Db`**: `PrepareQuery` is not abstract. The default checks `rows` and
+  calls `Prepare`, which is all SQLite needs, so `DbSqlite` and
+  `MockDriver` did not change.
+- **`DbPostgres`**: `PrepareQuery` prepares the query (`podb_<n>`, for the
+  description and the parameter count) and `DECLARE podb_cursor_<n> NO
+  SCROLL CURSOR FOR <query>` (`podb_declare_<n>`). The first `Step` runs the
+  `DECLARE` with `PQexecPrepared`; a `Step` that runs out of rows runs
+  `FETCH <rows> FROM podb_cursor_<n>` with `PQexec`. A batch short of `rows`
+  is the last and closes the cursor. `Reset` and `Finalize` close an open
+  cursor; `Finalize` deallocates both statements. `Changes` is 0.
+- **Tests**: `Conformance` runs 250-row loops 7 and 100 rows at a time,
+  with writes inside the loop, `Reset` and `Finalize` partway, the columns
+  before the first `Step` and `rows` = 0, with the same output on both
+  drivers. `TestPostgres` checks the error outside a transaction and after
+  `Commit`, that `pg_cursors` is empty after the last batch, `Reset` and
+  `Finalize`, that an `INSERT` fails at `PrepareQuery`, and an error in the
+  third batch followed by `Rollback`. `TestDb` checks the default.
 
-Questions for the user:
+**Done.** Learned on the way:
 
-1. The name: `PrepareQuery`, `PrepareCursor` or `PrepareScan`?
-2. A fixed 100 rows a `FETCH`, or a size given to `PrepareQuery`?
-3. Should `Prepare` alone describe the query, as above, or should
-   `ColumnCount` and `ColumnName` work only after the first `Step`, saving
-   one statement on the server?
-
-Tests, if approved: `Conformance` would run the existing 250-row loops
-through `PrepareQuery` with a statement inside the loop, and `Finalize`
-partway. `TestPostgres` would check the errors outside a transaction and
-after `Commit`, and use `pg_cursors` to check that `Reset` and `Finalize`
-close the cursor.
+- The cursor is closed with `PQclosePortal` (libpq 17), not the SQL
+  `CLOSE`. A probe showed that it works in a failed transaction, and does
+  nothing, without error, when the cursor is already gone. `CLOSE` of a
+  missing cursor would fail, and inside a transaction abort it.
+- After `Commit`, `Step` gives the rest of the batch it holds before the
+  `FETCH` fails. The documentation says so.
+- `pg_cursors` lists the unnamed portal of the query that reads it, so the
+  test counts only named cursors.
 
 ## Later, not scheduled
 
@@ -537,6 +511,48 @@ close the cursor.
   only when the collector runs, so it cannot replace `Close`. Decide with
   the user how it reports an error, and check with `make check-valgrind`
   that it frees what a forgotten handle holds.
+
+- Time zones. Today there are none: `Db.DateTime` has no zone field, and
+  the documentation says to use `DATE` and `TIMESTAMP` (not `TIMESTAMPTZ`)
+  and keep every value in one zone, such as UTC. What happens at the edges:
+  - Reading a PostgreSQL `timestamptz`: the server sends it in the
+    session's `TimeZone` with an offset (`2026-10-28 14:30:05+02`, or
+    `+05:30`), which `ColumnDateTime` rejects with `errRange`, so a zone is
+    never silently dropped. A program can select `t AT TIME ZONE 'UTC'`,
+    which gives a `timestamp` in UTC.
+  - Binding to a `timestamptz`: `BindDateTime` sends text without an
+    offset, which the server takes as a time in the session's `TimeZone`.
+    That is a silent shift unless the session is in UTC. This is the one
+    case that can go wrong without an error.
+  - SQLite has no zone type. Its date functions take text as UTC and accept
+    an offset suffix, but text with differing offsets no longer sorts in
+    time order.
+  - Converting to or from local time needs the zone database (daylight
+    saving rules), which neither Oberon nor poc's runtime has. That stays
+    out of scope whichever option is chosen.
+
+  Options, smallest first:
+  1. Leave it, as documented now.
+  2. Set the PostgreSQL session's `TimeZone` to `UTC` when connecting, as
+     the driver already does for `DateStyle`, and let `ColumnDateTime`
+     accept a zero offset (`+00`, `Z`). Binding a `timestamptz` is then
+     UTC, reading one gives UTC, and the interface does not change. The
+     cost: it overrides the server's or user's zone for the session, so
+     `now()` displays in UTC and `date_trunc('day', ...)` of a
+     `timestamptz` cuts days at UTC midnight. A program that wants another
+     zone can still `SET TimeZone` itself.
+  3. Add an offset field (minutes east of UTC) to `DateTime`, with a value
+     meaning "no zone". `BindDateTime` would append `+HH:MM`, and
+     `ColumnDateTime` would parse any offset. That changes the public
+     interface, and on SQLite mixed offsets break ordering.
+
+  Option 2 fixes the silent shift at little cost; option 3 is for programs
+  that must keep the writer's zone. Decide with the user.
+- Whether `Reset` keeps a statement's parameters. The design does not say,
+  and the drivers differ: `DbSqlite`'s `Reset` clears them
+  (`sqlite3_clear_bindings`), while `DbPostgres`'s keeps them. The tests
+  bind again after every `Reset`, so they pass on both. Pick one rule,
+  state it in the design's section 2.4 and test it in `Conformance`.
 
 - The BSDs: build and test on cymoril, artos and alerik. The library paths
   are `-link -L/usr/local/lib` on FreeBSD and OpenBSD and `/usr/pkg/lib` on

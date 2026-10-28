@@ -59,6 +59,7 @@ Oberon-2 has no interfaces, so abstraction is done with type-bound procedures on
 | `Db.Register(driver, scheme)` | Called by a driver at module initialisation |
 | `conn.Close` | Close the connection |
 | `conn.Prepare(sql, VAR stmt): BOOLEAN` | Prepare a statement |
+| `conn.PrepareQuery(sql, rows, VAR stmt): BOOLEAN` | Prepare a query whose rows the database reads `rows` at a time, to be stepped inside a transaction (section 2.10); `rows` < 1 sets `errRange` |
 | `conn.Exec(sql): BOOLEAN` | Run a parameterless statement to its end, ignoring any result rows |
 | `conn.Changes(): HUGEINT` | Rows inserted, updated or deleted by the last statement whose `Step` returned FALSE at the end of its run, `Exec`'s included; 0 if that run failed |
 | `conn.Begin() / Commit() / Rollback()` | Transactions |
@@ -174,6 +175,14 @@ END;
 - **Dates and time stamps.** `BindDate` binds `YYYY-MM-DD`, ignoring the time; `BindDateTime` binds `YYYY-MM-DD HH:MM:SS`, with `.ffffff` when the microseconds are not 0. Both check the date against the Gregorian calendar (leap years included) and the time's ranges, and set `errRange` instead of binding an invalid value. SQLite stores the text, which sorts and compares in date order and which its date functions understand. PostgreSQL takes it for a `date` or `timestamp`, and the driver sets `DateStyle` to `ISO` when it connects, so the server sends values back in the same form. `ColumnDateTime` parses `YYYY-MM-DD`, optionally followed by a space or `T`, `HH:MM`, `:SS` and a fraction of any length (digits beyond the sixth are dropped). A date alone has the time 00:00:00. Anything else, such as a value with a time zone, gives all fields 0 and `errRange`.
 - There are no time zones. Declare such columns `DATE` or `TIMESTAMP`, not `TIMESTAMPTZ`, and keep the values in one zone, such as UTC.
 
+### 2.10 Queries read a batch at a time
+
+`conn.PrepareQuery(sql, rows, VAR stmt)` prepares a query, a `SELECT` or `VALUES`, whose rows the database reads `rows` at a time, as `Step` needs them. Other statements can run on the connection while it is stepped, and `Reset` or `Finalize` partway costs nothing. On PostgreSQL that takes a cursor, which lives only in a transaction, so the rule for every driver is: step such a statement only between `Begin` and `Commit` or `Rollback`, and expect the transaction's end to end the query. After it, `Step` may give the rest of the batch it holds, then fails with `errSql`.
+
+`ColumnCount` and `ColumnName` work before the first `Step`, as they do after `Prepare`.
+
+`Db`'s default `PrepareQuery` checks `rows` and calls `Prepare`, which suits a database that computes each row as `Step` asks for it, as SQLite does. The PostgreSQL driver overrides it (section 3).
+
 ## 3. What each driver has to do
 
 ### SQLite
@@ -202,11 +211,16 @@ END;
 | `ColumnCount` / `ColumnName` | `PQnfields` / `PQfname` on the description, so they work before the first `Step` |
 | `Changes` | `PQcmdTuples`, when `PQcmdStatus` is an `INSERT`, `UPDATE`, `DELETE` or `MERGE`; the connection's `Changes` is the last finished statement's, kept in the connection |
 | `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype`; numbers are parsed from text, a `boolean`'s `t` or `f` reads as `1` or `0`, and `ColumnBlob` unescapes a `bytea` with `PQunescapeBytea` |
-| `Finalize` | `PQclear`, then `PQclosePrepared` (libpq 17 or later), which deallocates the statement even in a failed transaction, where `DEALLOCATE` is refused |
+| `PrepareQuery` | As `Prepare`, and also `PQprepare` of `DECLARE podb_cursor_<n> NO SCROLL CURSOR FOR <query>` under the name `podb_declare_<n>` |
+| `Step` of a `PrepareQuery` statement | First call opens the cursor with `PQexecPrepared` of the `DECLARE`; a call that runs out of rows runs `FETCH <rows> FROM podb_cursor_<n>` with `PQexec`. A batch short of `rows` is the last, and closes the cursor |
+| `Reset` | Discards the rest of the result (as below), and closes a `PrepareQuery` statement's cursor with `PQclosePortal` (libpq 17 or later) |
+| `Finalize` | `PQclear`, `PQclosePortal` for an open cursor, then `PQclosePrepared` (libpq 17 or later), which deallocates the statement even in a failed transaction, where `DEALLOCATE` is refused |
 | `Close` | `PQfinish` |
 | Error messages | `PQerrorMessage` |
 
 By default libpq returns the whole result set at once. The driver asks instead for chunks of 100 rows, so `Step` holds one chunk at a time and tracks the current row in it. While one statement's rows are arriving, the connection can run nothing else, so before any other command the driver reads the rest of that statement's results into memory, and the statement then steps through them. A query that fails partway gives the rows of the chunks before the error, then the error, as on SQLite. The command tag that `Changes` reads is on the last chunk if it is partly filled, and on the final result if not.
+
+A `PrepareQuery` statement avoids that. Each `FETCH` finishes before `Step` returns, so the connection is free for other statements between batches, and stopping early reads nothing more. Its cursor is closed with `PQclosePortal`, not the SQL `CLOSE`: like `PQclosePrepared`, it works in a failed transaction, and it does nothing if the transaction's end has already closed the cursor, where `CLOSE` would fail and abort the program's next transaction. The `DECLARE` is prepared alongside the query itself because a `DECLARE`'s description has no columns.
 
 ODBC (for example unixODBC) is an alternative single driver that could cover both databases, at the cost of an extra layer and driver-manager configuration.
 
@@ -219,7 +233,7 @@ ODBC (for example unixODBC) is an alternative single driver that could cover bot
 - **Reading a value as the wrong type.** SQLite converts any value to the type asked for: `ColumnInt` of the text `'abc'` is 0, with no error. The PostgreSQL driver parses the value's text, so `ColumnInt` of text that is not a number is 0 with `errRange`. Both truncate a real number toward zero for `ColumnInt`.
 - **Dialect features.** Date and time functions, upsert syntax (`ON CONFLICT`), and concurrency and locking behaviour differ. Stay within the common SQL subset, or isolate dialect-specific statements in one module.
 - **Concurrency.** SQLite allows one writer at a time. PostgreSQL's multi-user behaviour may expose problems that never appear in single-user SQLite testing.
-- **Result streaming.** The PostgreSQL driver streams a result in chunks, but only while the program runs no other statement on the connection. A statement run during a loop over another's rows makes the driver read the rest of the outer result into memory. For a very large result, use a second connection for the inner statements. `Reset` or `Finalize` partway through a result still reads and discards the rest of it.
+- **Result streaming.** The PostgreSQL driver streams a result in chunks, but only while the program runs no other statement on the connection. A statement run during a loop over another's rows makes the driver read the rest of the outer result into memory. For a very large result, use `conn.PrepareQuery` (section 2.10) or a second connection for the inner statements. `Reset` or `Finalize` partway through a `Prepare`d statement's result still reads and discards the rest of it.
 
 ## 5. Files
 
@@ -280,6 +294,7 @@ These were decided while planning the implementation (on 2026-10-27):
 - **Streaming PostgreSQL results** (2026-10-27): the driver reads a result in chunks of 100 rows (`PQsetChunkedRowsMode`, libpq 17), as section 3 describes.
 - **Additions to the interface** (2026-10-27): `typeBlob`, `BindBlob`, `ColumnBlob`, `Changes`, `ColumnIsNull`, and their `ByName` forms. `Translate` handles dollar-quoted strings.
 - **Booleans, dates and times, and the connection's `Changes`** (2026-10-28): `DateTime`, `BindBool`, `BindDate`, `BindDateTime`, `ColumnBool`, `ColumnDateTime` and their `ByName` forms (section 2.9), and `Connection.Changes`. `Exec` now steps its statement to the end instead of once. The PostgreSQL driver reads a `boolean` as the integer 1 or 0.
+- **`PrepareQuery`** (2026-10-28): queries read a batch at a time through a PostgreSQL cursor (section 2.10).
 - **`Db.Open`** checks the scheme's length before copying it, rejects a URL with no scheme, sets `lastError` to `""` on success, and sets it to a message if a driver returns NIL without one.
 
 `examples/DbDemo.Mod` differs from `doc/DbDemo.Mod` only in its use of `HUGEINT`, in taking an optional URL from the command line, in importing both drivers, and in deleting the table's rows first so that it can run twice on one file.
@@ -287,7 +302,6 @@ These were decided while planning the implementation (on 2026-10-27):
 ### 6.4 Not done
 
 - Finalizers that close a connection or statement the program forgot. They would tie the drivers to poc's `GarbageCollectedHeap` and are left for later.
-- Scanning a large PostgreSQL result with a server-side cursor, so that statements can run inside the loop and stopping early costs nothing. `PLAN.md` proposes a design (`conn.PrepareQuery`).
 - An ODBC driver, and the BSDs.
 
 ## Sources

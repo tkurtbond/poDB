@@ -148,5 +148,23 @@ reset halfway, then all: rows=250 sum=31375 err=0
 finalized halfway, then a count: ok
 Exec of a long result: ok
 
+== Queries read a batch at a time
+PrepareQuery of 0 rows at a time: FALSE err=3
+and no statement: ok
+columns before the first Step: ok
+begin: ok
+250 rows, 7 at a time: rows=250 sum=31375 err=0
+14 rows, 7 at a time: rows=14 sum=105 err=0
+writes while stepping: rows=250 sum=31375 err=0
+each write: ok
+reset partway, then all: rows=250 sum=31375 err=0
+finalized partway, then a count: ok
+commit: ok
+delete what they wrote: 0 then 5, after Reset 0
+begin: ok
+250 rows, 100 at a time: rows=250 sum=31375 err=0
+200 rows, 100 at a time: rows=200 sum=20100 err=0
+commit: ok
+
 == Many statements
 1000 statements prepared and finalized: ok

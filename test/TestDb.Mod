@@ -311,7 +311,13 @@ BEGIN
   MockDriver.value[0, 0] := "1"; MockDriver.value[1, 0] := "2";
   Out.String("Exec of two rows steps to the end:"); Out.Ln;
   ok := conn.Exec("SELECT");
-  Out.String("Exec SELECT: "); Bool(ok); ShowError(conn)
+  Out.String("Exec SELECT: "); Bool(ok); ShowError(conn);
+  (* the default PrepareQuery is Prepare, given at least 1 row at a time *)
+  Out.String("PrepareQuery of 0 rows: "); Bool(conn.PrepareQuery("SELECT", 0, st)); ShowError(conn);
+  Out.String("and no statement: "); Bool(st = NIL); Out.Ln;
+  ok := conn.PrepareQuery("SELECT", 10, st);
+  Out.String("PrepareQuery of 10 rows: "); Bool(ok); ShowError(conn);
+  st.Finalize
 END TestExec;
 
 

@@ -50,6 +50,12 @@ MODULE Db;
    Booleans, dates and time stamps have no type code of their own.  They
    are bound and read by the procedures in the section "Booleans, dates and
    times", written once here on top of the integer and text procedures.
+
+   PrepareQuery prepares a query whose rows the database reads a batch at
+   a time, for a result too large to hold or a loop that runs other
+   statements.  It is stepped only inside a transaction.  Its default here
+   is Prepare; a driver whose database sends a whole result at once
+   overrides it.
 *)
 
 CONST
@@ -337,6 +343,21 @@ PROCEDURE (c: Connection) Rollback* (): BOOLEAN;
 BEGIN
   RETURN c.Exec("ROLLBACK")
 END Rollback;
+
+PROCEDURE (c: Connection) PrepareQuery* (sql: ARRAY OF CHAR; rows: LONGINT; VAR s: Statement): BOOLEAN;
+(* Prepare a query, a SELECT or VALUES, whose rows the database reads rows
+   at a time as Step needs them, so that other statements can run on c
+   while it is stepped, and Reset or Finalize partway costs nothing.  Step
+   it only inside a transaction (Begin ... Commit or Rollback), whose end
+   ends the query.  rows < 1 sets errRange.  This default calls c.Prepare,
+   which suits a database that computes each row as Step asks for it, as
+   SQLite does; the PostgreSQL driver uses a cursor. *)
+BEGIN
+  IF rows < 1 THEN
+    s := NIL; SetError(c, errRange, "PrepareQuery needs at least 1 row at a time"); RETURN FALSE
+  END;
+  RETURN c.Prepare(sql, s)
+END PrepareQuery;
 
 PROCEDURE (c: Connection) Changes* (): HUGEINT;
 (* abstract: the number of rows inserted, updated or deleted by the last

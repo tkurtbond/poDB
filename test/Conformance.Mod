@@ -721,6 +721,90 @@ BEGIN
 END TestLong;
 
 
+(* ---- Queries read a batch at a time ---- *)
+
+PROCEDURE Query (rows: LONGINT; VAR s: Db.Statement);
+(* PrepareQuery a select of the rows 1 .. ?, read rows at a time. *)
+BEGIN
+  IF ~conn.PrepareQuery("WITH RECURSIVE series (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM series WHERE i < ?) SELECT i AS n FROM series", rows, s) THEN
+    Out.String("PrepareQuery failed: "); Out.String(conn.msg); Out.Ln;
+    HALT(1)
+  END
+END Query;
+
+PROCEDURE StepAll (label: ARRAY OF CHAR; s: Db.Statement);
+(* Step s to its end and show the rows and their sum. *)
+  VAR rows, sum: HUGEINT;
+BEGIN
+  rows := 0; sum := 0;
+  WHILE s.Step() DO INC(rows); INC(sum, s.ColumnInt(0)) END;
+  ShowSum(label, rows, sum)
+END StepAll;
+
+PROCEDURE TestQuery;
+  VAR s, insert: Db.Statement; name: ARRAY 16 OF CHAR; rows, sum: HUGEINT; ok: BOOLEAN;
+BEGIN
+  Heading("Queries read a batch at a time");
+  Error("PrepareQuery of 0 rows at a time", conn.PrepareQuery("SELECT 1", 0, s));
+  Check("and no statement", s = NIL);
+
+  Query(7, s);
+  s.ColumnName(0, name);
+  Check("columns before the first Step", (s.ColumnCount() = 1) & (name = "n"));
+  Check("begin", conn.Begin());
+  s.BindInt(1, 250);
+  StepAll("250 rows, 7 at a time", s);
+  s.Reset;
+  s.BindInt(1, 14);
+  StepAll("14 rows, 7 at a time", s);
+
+  (* write to the database while the rows are read *)
+  Prepare("INSERT INTO podb_conformance (id, name) VALUES (?, 'query')", insert);
+  s.Reset;
+  s.BindInt(1, 250);
+  rows := 0; sum := 0; ok := TRUE;
+  WHILE s.Step() DO
+    INC(rows); INC(sum, s.ColumnInt(0));
+    IF rows MOD 50 = 0 THEN
+      insert.BindInt(1, 2000 + rows);
+      ok := ok & ~insert.Step() & (conn.err = Db.noError);
+      insert.Reset;
+      ok := ok & (Count() > 0)
+    END
+  END;
+  ShowSum("writes while stepping", rows, sum);
+  Check("each write", ok);
+  insert.Finalize;
+
+  (* stop partway *)
+  s.Reset;
+  s.BindInt(1, 250);
+  rows := 0;
+  WHILE (rows < 20) & s.Step() DO INC(rows) END;
+  s.Reset;
+  s.BindInt(1, 250);
+  StepAll("reset partway, then all", s);
+  s.Reset;
+  s.BindInt(1, 250);
+  rows := 0;
+  WHILE (rows < 20) & s.Step() DO INC(rows) END;
+  s.Finalize;
+  Check("finalized partway, then a count", Count() >= 0);
+  Check("commit", conn.Commit());
+  Changes("delete what they wrote", "DELETE FROM podb_conformance WHERE id >= 2000");
+
+  Check("begin", conn.Begin());
+  Query(100, s);
+  s.BindInt(1, 250);
+  StepAll("250 rows, 100 at a time", s);
+  s.Reset;
+  s.BindInt(1, 200);
+  StepAll("200 rows, 100 at a time", s);
+  s.Finalize;
+  Check("commit", conn.Commit())
+END TestQuery;
+
+
 (* ---- Many statements ---- *)
 
 PROCEDURE TestMany;
@@ -763,6 +847,7 @@ BEGIN
   TestBlobs;
   TestTypes;
   TestLong;
+  TestQuery;
   TestMany;
   Setup("DROP TABLE podb_conformance");
   conn.Close

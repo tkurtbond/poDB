@@ -2,4 +2,17 @@ an error at row 250: rows=200 err=2
 an error at row 1: rows=0 err=2
 UPDATE ... RETURNING of 250 rows: rows=250 Changes=250 err=0
 UPDATE ... RETURNING of 200 rows: rows=200 Changes=200 err=0
+a query outside a transaction: 0 err=2
+in a transaction: 10 err=0
+cursors open: 1 err=0
+after commit: 4 err=2
+after Reset, in a new transaction: 30 err=0
+cursors open at the end: 0 err=0
+again: 10 err=0
+cursors open after Reset: 0 err=0
+again: 10 err=0
+cursors open after Finalize: 0 err=0
+PrepareQuery of an INSERT: FALSE err=2
+an error in a cursor's third batch: 200 err=2
+rollback after it: TRUE err=0
 the connection still works
