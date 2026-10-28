@@ -145,6 +145,10 @@ reasons.
 - `make check-postgres`: start the test cluster (if it is not running), run
   the PostgreSQL and cross-driver tests, then stop it.
 - `make check-all`: `check` plus `check-postgres`.
+- `make check-valgrind`: `Conformance` under valgrind with each driver. It
+  fails on a memory error or on any block left allocated at exit that is
+  not the collector's. `test/valgrind.supp` hides what poc's conservative
+  collector causes. Run it after changing a driver.
 - Run `make check-all` before every commit. If PostgreSQL cannot run, say so
   in the commit message.
 - Temporary files go in the session's scratch directory, never in the

@@ -322,6 +322,23 @@ test prints the same line for both databases.
 3. Check, with `-g` and a debugger, or with valgrind on the SQLite tests,
    that no handle or `PGresult` leaks in the `Conformance` run.
 
+**Done**, except step 2, which waits for the user's word. Learned on the
+way:
+
+- Step 1 came with Phase 4: `Conformance` imports both drivers, and `make
+  check` and `make check-postgres` run the same binary with each URL.
+- Under valgrind, every memory error is in poc's collector
+  (`GarbageCollectedHeap.MarkCandidate`, `DrainMarkStack`), which reads
+  uninitialised stack words as a conservative collector must.
+  `test/valgrind.supp` suppresses those, in those procedures only.
+- A forgotten handle is not "definitely lost" to valgrind: its address is
+  still in an Oberon record on the collector's heap, which valgrind scans,
+  so it is "still reachable". After a `Conformance` run, though, the only
+  blocks left are the collector's own three, with either driver. So `make
+  check-valgrind` suppresses blocks the collector allocated and counts every
+  other block left at exit as a leak. A probe that never finalized a
+  PostgreSQL statement failed it; `Conformance` passes.
+
 ## Phase 6: Libraries, installation, documentation
 
 1. `make` builds `db`, `db-sqlite` and `db-postgres` with `poc -library`,

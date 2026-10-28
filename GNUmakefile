@@ -4,6 +4,7 @@
 #   make check           the tests that need no server, under each size model
 #   make check-postgres  the tests that need the PostgreSQL test cluster
 #   make check-all       check and check-postgres
+#   make check-valgrind  Conformance under valgrind, for leaks and memory errors
 #   make clean           remove build/
 #
 # Modules compiled under -O2 cannot be mixed with modules compiled under -OC,
@@ -25,7 +26,7 @@ SQLITE_SOURCES := src/DbSqlite.Mod
 POSTGRES_SOURCES := src/DbPostgres.Mod src/DbPostgres.c
 LIBRARIES := db db-sqlite db-postgres
 
-.PHONY: all check check-postgres check-all clean \
+.PHONY: all check check-postgres check-all check-valgrind clean \
         $(addprefix check-,$(MODELS)) $(addprefix check-postgres-,$(MODELS))
 
 all: $(foreach m,$(MODELS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(m).stamp))
@@ -45,6 +46,26 @@ check-postgres: all
 	  $(MAKE) --no-print-directory $(addprefix check-postgres-,$(MODELS)); status=$$?; \
 	  test/pg-stop.sh; exit $$status; \
 	fi
+
+# check-valgrind runs Conformance (-O2) under valgrind with each driver and
+# fails on a memory error or on any block still allocated at exit that is
+# not the collector's own, so a statement or result the driver forgot to
+# free fails it.  test/valgrind.supp hides the reports that poc's
+# conservative collector causes.  It starts and stops the test cluster as
+# check-postgres does.
+VALGRIND := valgrind -q --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all \
+  --error-exitcode=1 --suppressions=test/valgrind.supp
+
+check-valgrind: check-O2
+	@echo "== conformance under valgrind, SQLite (-O2)"
+	$(VALGRIND) $(BUILD)/O2/test/Conformance sqlite::memory: > $(BUILD)/O2/test/Conformance-valgrind.out
+	diff -u test/Conformance.expected $(BUILD)/O2/test/Conformance-valgrind.out
+	@echo "== conformance under valgrind, PostgreSQL (-O2)"
+	@if [ -n "$$PODB_PG_URL" ]; then started=; else test/pg-start.sh || exit 1; started=yes; fi; \
+	$(VALGRIND) $(BUILD)/O2/test/Conformance "$$(test/pg-url.sh)" > $(BUILD)/O2/test/Conformance-valgrind.out; \
+	status=$$?; \
+	if [ -n "$$started" ]; then test/pg-stop.sh; fi; \
+	[ $$status -eq 0 ] && diff -u test/Conformance.expected $(BUILD)/O2/test/Conformance-valgrind.out
 
 clean:
 	rm -rf $(BUILD)

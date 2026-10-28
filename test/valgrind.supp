@@ -1,0 +1,37 @@
+# Suppressions for running poDB's tests under valgrind's memcheck.
+#
+# poc's collector is conservative: it scans the stack word by word for
+# anything that might be a pointer, uninitialised words included, so
+# memcheck reports its reads.  These suppress exactly those reports, in the
+# collector's own procedures, and nothing else.
+
+{
+   poc-gc-conditional
+   Memcheck:Cond
+   fun:GarbageCollectedHeap.*
+}
+{
+   poc-gc-value
+   Memcheck:Value8
+   fun:GarbageCollectedHeap.*
+}
+
+# The collector's own memory is still allocated when the program exits.
+# check-valgrind counts every other block still allocated at exit as a
+# leak, reachable or not: a handle that the program never closed still has
+# its address in an Oberon record on the collector's heap, so valgrind,
+# which scans that heap, would otherwise call it "still reachable".
+{
+   poc-gc-heap-calloc
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   fun:GarbageCollectedHeap.*
+}
+{
+   poc-gc-heap-malloc
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:GarbageCollectedHeap.*
+}
