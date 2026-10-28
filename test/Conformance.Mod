@@ -8,8 +8,9 @@ MODULE Conformance;
    It imports both drivers, so the URL alone picks the driver.
 
    It uses only SQL that SQLite and PostgreSQL both accept (design, section
-   4), works in tables of its own, podb_conformance and podb_blobs (BYTEA is
-   PostgreSQL's BLOB type, and a name SQLite accepts), and prints one line per
+   4), works in tables of its own, podb_conformance, podb_blobs (BYTEA is
+   PostgreSQL's BLOB type, and a name SQLite accepts) and podb_types, and
+   prints one line per
    case, which make compares with Conformance.expected.  Error messages
    differ between databases, so it prints error codes, never messages. *)
 
@@ -448,6 +449,133 @@ BEGIN
   Check("each run counts its own rows", ok)
 END TestChanges;
 
+PROCEDURE ConnectionChanges (label, sql: ARRAY OF CHAR);
+(* Exec sql and print the connection's Changes. *)
+  VAR ok: BOOLEAN;
+BEGIN
+  ok := conn.Exec(sql);
+  Out.String(label); Out.String(": "); Out.Int(conn.Changes(), 0);
+  IF ~ok THEN Out.String(" (Exec failed)") END;
+  Out.Ln
+END ConnectionChanges;
+
+PROCEDURE TestConnectionChanges;
+  VAR s: Db.Statement; ok: BOOLEAN;
+BEGIN
+  Heading("The connection's Changes");
+  ConnectionChanges("insert 3", "INSERT INTO podb_conformance (id, name) VALUES (80, 'd'), (81, 'd'), (82, 'd')");
+  ConnectionChanges("update none", "UPDATE podb_conformance SET n = 1 WHERE id < 0");
+  ConnectionChanges("update 3 returning", "UPDATE podb_conformance SET n = 1 WHERE name = 'd' RETURNING id");
+  ConnectionChanges("a duplicate key", "INSERT INTO podb_conformance (id, name) VALUES (80, 'd')");
+  ConnectionChanges("delete 1", "DELETE FROM podb_conformance WHERE id = 80");
+  ConnectionChanges("create", "CREATE TABLE podb_changes (a INTEGER)");
+  ConnectionChanges("drop", "DROP TABLE podb_changes");
+
+  Prepare("DELETE FROM podb_conformance WHERE name = 'd'", s);
+  ok := ~s.Step() & (conn.Changes() = 2);
+  s.Finalize;
+  Prepare("SELECT id FROM podb_conformance WHERE id < 0", s);
+  ok := ok & (conn.Changes() = 2) & ~s.Step() & (conn.Changes() = 0);
+  s.Finalize;
+  Check("a prepared statement sets it when Step returns FALSE", ok)
+END TestConnectionChanges;
+
+
+(* ---- Booleans, dates and times ---- *)
+
+PROCEDURE SetDateTime (VAR d: Db.DateTime; year, month, day, hour, minute, second: INTEGER;
+    microsecond: LONGINT);
+BEGIN
+  d.year := year; d.month := month; d.day := day;
+  d.hour := hour; d.minute := minute; d.second := second; d.microsecond := microsecond
+END SetDateTime;
+
+PROCEDURE ShowDateTime (label: ARRAY OF CHAR; VAR d: Db.DateTime);
+BEGIN
+  Out.String(label);
+  Out.Int(d.year, 0); Out.Char("/"); Out.Int(d.month, 0); Out.Char("/"); Out.Int(d.day, 0);
+  Out.Char(" "); Out.Int(d.hour, 0); Out.Char(":"); Out.Int(d.minute, 0); Out.Char(":");
+  Out.Int(d.second, 0); Out.Char("."); Out.Int(d.microsecond, 0)
+END ShowDateTime;
+
+PROCEDURE InsertTypes (s: Db.Statement; id: HUGEINT; b: BOOLEAN; VAR d, t: Db.DateTime);
+BEGIN
+  s.Reset;
+  s.BindIntByName("id", id); s.BindBoolByName("b", b);
+  s.BindDateByName("d", d); s.BindDateTimeByName("t", t);
+  IF s.Step() OR (conn.err # Db.noError) THEN Check("insert", FALSE) END
+END InsertTypes;
+
+PROCEDURE TestTypes;
+  VAR s, s2: Db.Statement; d, t: Db.DateTime; text: ARRAY 64 OF CHAR; ok: BOOLEAN;
+BEGIN
+  Heading("Booleans, dates and times");
+  Setup("CREATE TABLE podb_types (id INTEGER PRIMARY KEY, b BOOLEAN, d DATE, t TIMESTAMP)");
+  Prepare("INSERT INTO podb_types (id, b, d, t) VALUES (:id, :b, :d, :t)", s);
+  SetDateTime(d, 2026, 10, 28, 9, 9, 9, 9);   (* BindDate ignores the time *)
+  SetDateTime(t, 2026, 10, 28, 14, 30, 5, 250);
+  InsertTypes(s, 1, TRUE, d, t);
+  SetDateTime(d, 1, 1, 1, 0, 0, 0, 0);
+  SetDateTime(t, 9999, 12, 31, 23, 59, 59, 999999);
+  InsertTypes(s, 2, FALSE, d, t);
+  SetDateTime(d, 2024, 2, 29, 0, 0, 0, 0);
+  SetDateTime(t, 2000, 1, 2, 3, 4, 5, 0);
+  InsertTypes(s, 3, TRUE, d, t);
+  s.Reset;
+  s.BindIntByName("id", 4); s.BindNullByName("b"); s.BindNullByName("d"); s.BindNullByName("t");
+  ok := ~s.Step() & (conn.err = Db.noError);
+  s.Finalize;
+  Check("inserted", ok);
+
+  Prepare("SELECT id, b, d, t FROM podb_types ORDER BY id", s);
+  WHILE s.Step() DO
+    Out.String("id="); Out.Int(s.ColumnInt(0), 0);
+    Out.String(" b: type="); Out.Int(s.ColumnType(1), 0);
+    Out.String(" int="); Out.Int(s.ColumnInt(1), 0);
+    s.ColumnText(1, text); Out.String(" text=["); Out.String(text); Out.String("]");
+    Out.String(" bool=");
+    IF s.ColumnBoolByName("b") THEN Out.String("TRUE") ELSE Out.String("FALSE") END;
+    Out.Ln;
+    s.ColumnText(2, text);
+    Out.String("  d: type="); Out.Int(s.ColumnType(2), 0); Out.String(" text=["); Out.String(text); Out.String("]");
+    s.ColumnDateTime(2, d); ShowDateTime(" ", d); Out.Ln;
+    s.ColumnDateTimeByName("t", t); ShowDateTime("  t: ", t);
+    IF conn.err # Db.noError THEN Out.String(" err="); Out.Int(conn.err, 0) END;
+    Out.Ln
+  END;
+  Check("selected", conn.err = Db.noError);
+  s.Finalize;
+
+  Prepare("SELECT COUNT(*) FROM podb_types WHERE b = ? AND d < ?", s);
+  s.BindBool(1, TRUE);
+  SetDateTime(d, 2025, 1, 1, 0, 0, 0, 0); s.BindDate(2, d);
+  ok := s.Step() & (s.ColumnInt(0) = 1);
+  s.Finalize;
+  Check("compared with a bound boolean and date", ok);
+
+  Prepare("SELECT id FROM podb_types WHERE t > ? ORDER BY id", s);
+  SetDateTime(t, 2026, 10, 28, 14, 30, 5, 249); s.BindDateTime(1, t);
+  ok := s.Step() & (s.ColumnInt(0) = 1) & s.Step() & (s.ColumnInt(0) = 2) & ~s.Step();
+  s.Finalize;
+  Check("compared with a bound time stamp", ok);
+
+  Prepare("SELECT 1 = 1, 1 = 0", s);
+  ok := s.Step() & s.ColumnBool(0) & ~s.ColumnBool(1) & (s.ColumnInt(0) = 1) & (s.ColumnType(1) = Db.typeInt);
+  s.Finalize;
+  Check("a comparison reads as 1 or 0", ok);
+
+  Prepare("SELECT 'abc'", s);
+  Prepare("UPDATE podb_types SET d = ? WHERE id = 1", s2);
+  SetDateTime(d, 2026, 2, 30, 0, 0, 0, 0);
+  s2.BindDate(1, d);
+  Error("BindDate of February 30", FALSE);
+  s2.Finalize;
+  IF s.Step() THEN s.ColumnDateTime(0, d); Error("ColumnDateTime of 'abc'", FALSE) END;
+  s.Finalize;
+
+  Setup("DROP TABLE podb_types")
+END TestTypes;
+
 
 (* ---- BLOBs ---- *)
 
@@ -631,7 +759,9 @@ BEGIN
   TestReuse;
   TestReturning;
   TestChanges;
+  TestConnectionChanges;
   TestBlobs;
+  TestTypes;
   TestLong;
   TestMany;
   Setup("DROP TABLE podb_conformance");

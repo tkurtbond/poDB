@@ -132,11 +132,21 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
   `0X`. `ColumnBlob` truncates too, adds no `0X`, and returns the value's
   whole length.
 - `Changes` gives the number of rows a prepared statement's last run
-  inserted, updated or deleted, once `Step` has returned FALSE. `Exec` gives
-  no count.
+  inserted, updated or deleted, once `Step` has returned FALSE.
+  `conn.Changes()` gives the count of the last statement to finish, so after
+  `conn.Exec(...)` it is the rows `Exec` changed. `Exec` runs its statement
+  to the end, so an `UPDATE ... RETURNING` is counted whole.
 - For binary data, declare the column `BYTEA`, bind with `BindBlob` and read
   with `ColumnBlob`. SQLite accepts the type name and stores the bytes
   unchanged.
+- For booleans, declare the column `BOOLEAN`, bind with `BindBool` and read
+  with `ColumnBool`. Both databases see 1 or 0.
+- For dates and times, declare the column `DATE` or `TIMESTAMP` (not
+  `TIMESTAMPTZ`), bind a `Db.DateTime` with `BindDate` or `BindDateTime`,
+  and read it with `ColumnDateTime`. Values travel as ISO 8601 text
+  (`2026-10-28 14:30:05`), which SQLite stores as it is and which sorts in
+  date order. There are no time zones; keep the values in one, such as UTC.
+  An invalid date, such as February 30, sets `errRange`.
 
 ## The SQLite driver
 
@@ -186,6 +196,7 @@ type the server declares for it:
 | PostgreSQL type | `ColumnType` |
 |---|---|
 | `smallint`, `integer`, `bigint` | `typeInt` |
+| `boolean` | `typeInt`, reading as 1 or 0 |
 | `real`, `double precision`, `numeric` | `typeReal` |
 | `bytea` | `typeBlob` |
 | NULL, any type | `typeNull` |
@@ -197,7 +208,9 @@ with `conn.err` set to `errRange`.
 
 **Limits.**
 
-- A `boolean` reads as the text `t` or `f`, where SQLite stores 1 or 0.
+- A `timestamptz` reads in the server's time zone with an offset
+  (`+02`), which `ColumnDateTime` does not parse. Use `timestamp`. The
+  driver sets `DateStyle` to `ISO` when it connects.
 - `ColumnText` of a `bytea` gives PostgreSQL's hex form (`\x...`). Use
   `ColumnBlob`.
 - `BindBlob` sends its bytes in binary format, so its parameter should be a

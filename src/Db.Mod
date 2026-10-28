@@ -44,6 +44,12 @@ MODULE Db;
        ColumnBlob does too, and returns the value's whole length.
      - Changes is the number of rows the statement's last run inserted,
        updated or deleted, once Step has returned FALSE; Reset sets it to 0.
+       The connection's Changes is the Changes of the last statement whose
+       Step returned FALSE at the end of its run, or 0 if that run failed.
+
+   Booleans, dates and time stamps have no type code of their own.  They
+   are bound and read by the procedures in the section "Booleans, dates and
+   times", written once here on top of the integer and text procedures.
 *)
 
 CONST
@@ -84,6 +90,12 @@ TYPE
   StatementDesc* = RECORD
     conn*: Connection;
     params*: Params
+  END;
+
+  DateTime* = RECORD
+    year*, month*, day*: INTEGER;      (* 1 .. 9999, 1 .. 12, 1 .. 31 *)
+    hour*, minute*, second*: INTEGER;  (* 0 .. 23, 0 .. 59, 0 .. 59 *)
+    microsecond*: LONGINT              (* 0 .. 999999 *)
   END;
 
   DriverDesc* = RECORD
@@ -301,11 +313,12 @@ BEGIN
 END Prepare;
 
 PROCEDURE (c: Connection) Exec* (sql: ARRAY OF CHAR): BOOLEAN;
-(* Run one statement that needs no parameters and ignore any result row. *)
-  VAR s: Statement; row: BOOLEAN;
+(* Run one statement that needs no parameters, to its end, and ignore any
+   result rows.  Then c.Changes() gives the rows it changed. *)
+  VAR s: Statement;
 BEGIN
   IF ~c.Prepare(sql, s) THEN RETURN FALSE END;
-  row := s.Step();
+  WHILE s.Step() DO END;
   s.Finalize;
   RETURN c.err = noError
 END Exec;
@@ -324,6 +337,15 @@ PROCEDURE (c: Connection) Rollback* (): BOOLEAN;
 BEGIN
   RETURN c.Exec("ROLLBACK")
 END Rollback;
+
+PROCEDURE (c: Connection) Changes* (): HUGEINT;
+(* abstract: the number of rows inserted, updated or deleted by the last
+   statement whose Step returned FALSE at the end of its run, Exec's
+   included; 0 if that run failed or changed no rows.  A statement that
+   fails in Prepare does not run, so check Exec's result first. *)
+BEGIN
+  RETURN 0
+END Changes;
 
 
 (* ---- Statement: numbered binding, implemented by drivers ---- *)
@@ -543,6 +565,224 @@ BEGIN
   IF i < 0 THEN SetError(s.conn, errRange, "no such column name"); RETURN TRUE END;
   RETURN s.ColumnIsNull(i)
 END ColumnIsNullByName;
+
+
+(* ---- Booleans, dates and times, written once here ----
+   A boolean is bound as the integer 1 or 0.  SQLite stores that as it is,
+   and PostgreSQL takes it for a boolean as well as for an integer.  It
+   reads as TRUE for any value whose ColumnInt is not 0; the PostgreSQL
+   driver reads a boolean as 1 or 0.
+
+   A date or a time stamp is bound as ISO 8601 text: "2026-10-28", or
+   "2026-10-28 14:30:00" with ".ffffff" after it if the microseconds are
+   not 0.  SQLite stores the text, which sorts and compares as the dates
+   do, and its date functions understand it.  PostgreSQL takes it for a
+   date or a timestamp, and its driver asks for ISO output.  ColumnDateTime
+   parses that form back, with "T" also allowed between the date and the
+   time, and any number of digits after the decimal point (beyond six are
+   dropped).  A value with a time zone, such as PostgreSQL's timestamptz
+   gives, is not one it parses. *)
+
+PROCEDURE DaysIn (year, month: INTEGER): INTEGER;
+(* the number of days in month (1 .. 12) of year, in the Gregorian calendar *)
+BEGIN
+  IF month = 2 THEN
+    IF (year MOD 4 = 0) & ((year MOD 100 # 0) OR (year MOD 400 = 0)) THEN RETURN 29 ELSE RETURN 28 END
+  ELSIF (month = 4) OR (month = 6) OR (month = 9) OR (month = 11) THEN RETURN 30
+  ELSE RETURN 31
+  END
+END DaysIn;
+
+PROCEDURE ValidDate (VAR d: DateTime): BOOLEAN;
+BEGIN
+  RETURN (d.year >= 1) & (d.year <= 9999) & (d.month >= 1) & (d.month <= 12)
+    & (d.day >= 1) & (d.day <= DaysIn(d.year, d.month))
+END ValidDate;
+
+PROCEDURE ValidTime (VAR d: DateTime): BOOLEAN;
+BEGIN
+  RETURN (d.hour >= 0) & (d.hour <= 23) & (d.minute >= 0) & (d.minute <= 59)
+    & (d.second >= 0) & (d.second <= 59) & (d.microsecond >= 0) & (d.microsecond <= 999999)
+END ValidTime;
+
+PROCEDURE PutNumber (VAR out: ARRAY OF CHAR; VAR o: LONGINT; n: LONGINT; width: INTEGER);
+(* n, which is not negative and has at most width digits, in width digits
+   with leading zeros *)
+  VAR k: INTEGER;
+BEGIN
+  FOR k := width - 1 TO 0 BY -1 DO
+    out[o + k] := CHR(ORD("0") + n MOD 10); n := n DIV 10
+  END;
+  INC(o, width)
+END PutNumber;
+
+PROCEDURE FormatDateTime (VAR d: DateTime; withTime: BOOLEAN; VAR out: ARRAY OF CHAR);
+(* d, which is valid, as ISO 8601 text; out has room for 27 characters *)
+  VAR o: LONGINT;
+BEGIN
+  o := 0;
+  PutNumber(out, o, d.year, 4); out[o] := "-"; INC(o);
+  PutNumber(out, o, d.month, 2); out[o] := "-"; INC(o);
+  PutNumber(out, o, d.day, 2);
+  IF withTime THEN
+    out[o] := " "; INC(o);
+    PutNumber(out, o, d.hour, 2); out[o] := ":"; INC(o);
+    PutNumber(out, o, d.minute, 2); out[o] := ":"; INC(o);
+    PutNumber(out, o, d.second, 2);
+    IF d.microsecond # 0 THEN out[o] := "."; INC(o); PutNumber(out, o, d.microsecond, 6) END
+  END;
+  out[o] := 0X
+END FormatDateTime;
+
+PROCEDURE IsDigit (c: CHAR): BOOLEAN;
+BEGIN
+  RETURN (c >= "0") & (c <= "9")
+END IsDigit;
+
+PROCEDURE Digits (VAR t: ARRAY OF CHAR; VAR i: LONGINT; width: INTEGER; VAR n: INTEGER): BOOLEAN;
+(* Read exactly width (at most 4) digits of t from i into n. *)
+  VAR k: INTEGER;
+BEGIN
+  n := 0;
+  FOR k := 1 TO width DO
+    IF ~IsDigit(t[i]) THEN RETURN FALSE END;
+    n := n * 10 + (ORD(t[i]) - ORD("0")); INC(i)
+  END;
+  RETURN TRUE
+END Digits;
+
+PROCEDURE Separator (VAR t: ARRAY OF CHAR; VAR i: LONGINT; c: CHAR): BOOLEAN;
+(* Skip t[i] if it is c. *)
+BEGIN
+  IF t[i] # c THEN RETURN FALSE END;
+  INC(i);
+  RETURN TRUE
+END Separator;
+
+PROCEDURE ParseDateTime (VAR t: ARRAY OF CHAR; VAR d: DateTime): BOOLEAN;
+(* Parse t, 0X-terminated, as "YYYY-MM-DD", optionally followed by a space
+   or "T" and "HH:MM", ":SS" and ".fff..."; TRUE if it is a valid date or
+   time stamp. *)
+  VAR i, scale: LONGINT;
+BEGIN
+  i := 0;
+  IF ~Digits(t, i, 4, d.year) OR ~Separator(t, i, "-") OR ~Digits(t, i, 2, d.month)
+     OR ~Separator(t, i, "-") OR ~Digits(t, i, 2, d.day) THEN
+    RETURN FALSE
+  END;
+  IF t[i] # 0X THEN
+    IF (t[i] # " ") & (t[i] # "T") THEN RETURN FALSE END;
+    INC(i);
+    IF ~Digits(t, i, 2, d.hour) OR ~Separator(t, i, ":") OR ~Digits(t, i, 2, d.minute) THEN
+      RETURN FALSE
+    END;
+    IF t[i] = ":" THEN
+      INC(i);
+      IF ~Digits(t, i, 2, d.second) THEN RETURN FALSE END;
+      IF t[i] = "." THEN
+        INC(i);
+        IF ~IsDigit(t[i]) THEN RETURN FALSE END;
+        scale := 100000;
+        WHILE IsDigit(t[i]) DO
+          INC(d.microsecond, (ORD(t[i]) - ORD("0")) * scale); scale := scale DIV 10; INC(i)
+        END
+      END
+    END
+  END;
+  RETURN (t[i] = 0X) & ValidDate(d) & ValidTime(d)
+END ParseDateTime;
+
+PROCEDURE ClearDateTime (VAR d: DateTime);
+BEGIN
+  d.year := 0; d.month := 0; d.day := 0;
+  d.hour := 0; d.minute := 0; d.second := 0; d.microsecond := 0
+END ClearDateTime;
+
+PROCEDURE (s: Statement) BindBool* (i: INTEGER; v: BOOLEAN);
+(* Bind v to parameter i (1-based), as 1 or 0. *)
+BEGIN
+  IF v THEN s.BindInt(i, 1) ELSE s.BindInt(i, 0) END
+END BindBool;
+
+PROCEDURE (s: Statement) BindDate* (i: INTEGER; d: DateTime);
+(* Bind d's date to parameter i (1-based), as "YYYY-MM-DD"; d's time is
+   ignored.  An invalid date sets errRange. *)
+  VAR text: ARRAY 32 OF CHAR;
+BEGIN
+  IF ValidDate(d) THEN FormatDateTime(d, FALSE, text); s.BindText(i, text)
+  ELSE SetError(s.conn, errRange, "not a valid date")
+  END
+END BindDate;
+
+PROCEDURE (s: Statement) BindDateTime* (i: INTEGER; d: DateTime);
+(* Bind d to parameter i (1-based), as "YYYY-MM-DD HH:MM:SS", with
+   ".ffffff" if d.microsecond # 0.  An invalid date or time sets errRange. *)
+  VAR text: ARRAY 32 OF CHAR;
+BEGIN
+  IF ValidDate(d) & ValidTime(d) THEN FormatDateTime(d, TRUE, text); s.BindText(i, text)
+  ELSE SetError(s.conn, errRange, "not a valid date and time")
+  END
+END BindDateTime;
+
+PROCEDURE (s: Statement) ColumnBool* (i: INTEGER): BOOLEAN;
+(* TRUE if column i's value is not 0 as an integer; FALSE for NULL. *)
+BEGIN
+  RETURN s.ColumnInt(i) # 0
+END ColumnBool;
+
+PROCEDURE (s: Statement) ColumnDateTime* (i: INTEGER; VAR d: DateTime);
+(* Parse column i's value, a date or a time stamp in ISO 8601 form, into d.
+   A date alone gives a time of 00:00:00.  NULL gives all fields 0; so does
+   any other value, which also sets errRange. *)
+  VAR text: ARRAY 64 OF CHAR;
+BEGIN
+  ClearDateTime(d);
+  IF s.ColumnType(i) # typeNull THEN
+    s.ColumnText(i, text);
+    IF ~ParseDateTime(text, d) THEN
+      ClearDateTime(d);
+      SetError(s.conn, errRange, "not a date or a time stamp")
+    END
+  END
+END ColumnDateTime;
+
+PROCEDURE (s: Statement) BindBoolByName* (name: ARRAY OF CHAR; v: BOOLEAN);
+  VAR i: INTEGER;
+BEGIN
+  i := IndexOf(s.params, name);
+  IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindBool(i, v) END
+END BindBoolByName;
+
+PROCEDURE (s: Statement) BindDateByName* (name: ARRAY OF CHAR; d: DateTime);
+  VAR i: INTEGER;
+BEGIN
+  i := IndexOf(s.params, name);
+  IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindDate(i, d) END
+END BindDateByName;
+
+PROCEDURE (s: Statement) BindDateTimeByName* (name: ARRAY OF CHAR; d: DateTime);
+  VAR i: INTEGER;
+BEGIN
+  i := IndexOf(s.params, name);
+  IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindDateTime(i, d) END
+END BindDateTimeByName;
+
+PROCEDURE (s: Statement) ColumnBoolByName* (name: ARRAY OF CHAR): BOOLEAN;
+  VAR i: INTEGER;
+BEGIN
+  i := s.ColumnIndex(name);
+  IF i < 0 THEN SetError(s.conn, errRange, "no such column name"); RETURN FALSE END;
+  RETURN s.ColumnBool(i)
+END ColumnBoolByName;
+
+PROCEDURE (s: Statement) ColumnDateTimeByName* (name: ARRAY OF CHAR; VAR d: DateTime);
+  VAR i: INTEGER;
+BEGIN
+  i := s.ColumnIndex(name);
+  IF i < 0 THEN SetError(s.conn, errRange, "no such column name"); ClearDateTime(d)
+  ELSE s.ColumnDateTime(i, d)
+  END
+END ColumnDateTimeByName;
 
 
 (* ---- Opening ---- *)

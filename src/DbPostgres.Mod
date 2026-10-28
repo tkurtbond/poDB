@@ -36,6 +36,7 @@ CONST
   textFormat = 0;
   binaryFormat = 1;
   (* pg_type.h *)
+  boolOid = 16;
   byteaOid = 17;
   int8Oid = 20;
   int2Oid = 21;
@@ -61,7 +62,8 @@ TYPE
   ConnectionDesc = RECORD (Db.ConnectionDesc)
     pg: SYSTEM.ADDRESS;   (* PGconn *, or 0 once closed *)
     prepared: LONGINT;    (* the number of statements prepared, for their names *)
-    active: Statement     (* the statement whose results are still arriving, or NIL *)
+    active: Statement;    (* the statement whose results are still arriving, or NIL *)
+    changes: HUGEINT      (* the Changes of the last statement to finish *)
   END;
 
   Pending = POINTER TO PendingDesc;
@@ -90,6 +92,7 @@ TYPE
 
 VAR
   driver, alias: Driver;
+  one, zero: ARRAY 2 OF CHAR;   (* what a boolean value reads as *)
 
 
 (* ---- libpq ---- *)
@@ -106,6 +109,7 @@ PROCEDURE ["C", "PQsendQueryPrepared"] SendPrepared (conn, name: SYSTEM.ADDRESS;
     resultFormat: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "PQsetChunkedRowsMode"] SetChunkedRows (conn: SYSTEM.ADDRESS; chunkSize: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "PQgetResult"] GetResult (conn: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQexec"] Execute (conn, query: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQclosePrepared"] ClosePrepared (conn, name: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQresultStatus"] ResultStatus (result: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "PQresultErrorMessage"] ResultError (result: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
@@ -265,9 +269,9 @@ END Deallocate;
 
 PROCEDURE (d: Driver) Open* (url: ARRAY OF CHAR): Db.Connection;
 (* Connect to the database that url names; see the module's comment. *)
-  VAR c: Connection;
+  VAR c: Connection; result: SYSTEM.ADDRESS; dateStyle: ARRAY 32 OF CHAR;
 BEGIN
-  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.prepared := 0; c.active := NIL;
+  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.prepared := 0; c.active := NIL; c.changes := 0;
   c.pg := ConnectDatabase(SYSTEM.ADR(url));
   IF c.pg = 0 THEN Db.lastError := "DbPostgres: out of memory"; RETURN NIL END;
   IF ConnectionStatus(c.pg) # connectionOk THEN
@@ -276,6 +280,16 @@ BEGIN
     RETURN NIL
   END;
   IgnoreNotices(c.pg);
+  (* Dates and time stamps come back as ISO 8601, which Db.ColumnDateTime
+     parses, whatever the server's default. *)
+  dateStyle := "SET DateStyle TO ISO";
+  result := Execute(c.pg, SYSTEM.ADR(dateStyle));
+  IF ResultStatus(result) # commandOk THEN
+    CopyMessage(ResultError(result), Db.lastError);
+    Clear(result); Finish(c.pg);
+    RETURN NIL
+  END;
+  Clear(result);
   RETURN c
 END Open;
 
@@ -331,6 +345,14 @@ BEGIN
   s := st;
   RETURN TRUE
 END Prepare;
+
+PROCEDURE (c: Connection) Changes* (): HUGEINT;
+(* The rows changed by the last statement whose Step returned FALSE at the
+   end of its run; 0 if that run failed. *)
+BEGIN
+  c.err := Db.noError;
+  RETURN c.changes
+END Changes;
 
 
 (* ---- Statement: binding ---- *)
@@ -428,7 +450,7 @@ BEGIN
   s.executed := TRUE; s.done := FALSE; s.row := -1; s.rows := 0; s.changes := 0;
   IF SendPrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]),
       SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat) = 0 THEN
-    SetResultError(c, 0); s.done := TRUE
+    SetResultError(c, 0); s.done := TRUE; c.changes := 0
   ELSE
     c.active := s;
     (* If libpq refuses chunked rows, the whole result comes as one. *)
@@ -448,7 +470,7 @@ BEGIN
   Clear(s.result); s.result := 0; s.row := -1; s.rows := 0;
   result := NextResult(s);
   IF result = 0 THEN
-    s.done := TRUE;
+    s.done := TRUE; c.changes := 0;
     Db.SetError(c, Db.errSql, "DbPostgres: the server sent no result")
   ELSE
     status := ResultStatus(result);
@@ -464,6 +486,7 @@ BEGIN
       IF status = emptyQuery THEN Db.SetError(c, Db.errSql, "DbPostgres: no SQL statement")
       ELSIF (status # tuplesOk) & (status # commandOk) THEN SetResultError(c, result)
       END;
+      IF c.err = Db.noError THEN c.changes := s.changes ELSE c.changes := 0 END;
       IF status # tuplesOk THEN Clear(result) END;
       (* Read the NULL that ends the run, which frees the connection. *)
       result := NextResult(s);
@@ -543,6 +566,20 @@ BEGIN
   RETURN GetIsNull(s.result, s.row, i) # 0
 END IsNull;
 
+PROCEDURE ValueOf (s: Statement; i: INTEGER): SYSTEM.ADDRESS;
+(* The address of column i's text in the current row, which is on a
+   column.  A boolean's "t" or "f" reads as "1" or "0", as SQLite stores
+   it. *)
+  VAR p: SYSTEM.ADDRESS; c: CHAR;
+BEGIN
+  p := GetValue(s.result, s.row, i);
+  IF FieldType(s.result, i) = boolOid THEN
+    SYSTEM.GET(p, c);
+    IF c = "t" THEN p := SYSTEM.ADR(one) ELSIF c = "f" THEN p := SYSTEM.ADR(zero) END
+  END;
+  RETURN p
+END ValueOf;
+
 PROCEDURE (s: Statement) ColumnCount* (): INTEGER;
 (* Number of columns in the statement's result; known before the first Step. *)
 BEGIN
@@ -568,7 +605,7 @@ PROCEDURE (s: Statement) ColumnType* (i: INTEGER): INTEGER;
 BEGIN
   IF ~OnColumn(s, i) OR IsNull(s, i) THEN RETURN Db.typeNull END;
   type := FieldType(s.result, i);
-  IF (type = int2Oid) OR (type = int4Oid) OR (type = int8Oid) THEN RETURN Db.typeInt
+  IF (type = int2Oid) OR (type = int4Oid) OR (type = int8Oid) OR (type = boolOid) THEN RETURN Db.typeInt
   ELSIF (type = float4Oid) OR (type = float8Oid) OR (type = numericOid) THEN RETURN Db.typeReal
   ELSIF type = byteaOid THEN RETURN Db.typeBlob
   ELSE RETURN Db.typeText
@@ -582,7 +619,7 @@ PROCEDURE (s: Statement) ColumnInt* (i: INTEGER): HUGEINT;
 BEGIN
   v := 0;
   IF OnColumn(s, i) & ~IsNull(s, i) THEN
-    IF ParseInt(GetValue(s.result, s.row, i), SYSTEM.ADR(v)) = 0 THEN
+    IF ParseInt(ValueOf(s, i), SYSTEM.ADR(v)) = 0 THEN
       Db.SetError(s.conn, Db.errRange, "DbPostgres: the value is not an integer")
     END
   END;
@@ -596,7 +633,7 @@ PROCEDURE (s: Statement) ColumnReal* (i: INTEGER): LONGREAL;
 BEGIN
   v := 0;
   IF OnColumn(s, i) & ~IsNull(s, i) THEN
-    IF ParseReal(GetValue(s.result, s.row, i), SYSTEM.ADR(v)) = 0 THEN
+    IF ParseReal(ValueOf(s, i), SYSTEM.ADR(v)) = 0 THEN
       Db.SetError(s.conn, Db.errRange, "DbPostgres: the value is not a number")
     END
   END;
@@ -607,7 +644,7 @@ PROCEDURE (s: Statement) ColumnText* (i: INTEGER; VAR out: ARRAY OF CHAR);
 (* Column i's value as text, truncated to fit out; "" for NULL. *)
 BEGIN
   out[0] := 0X;
-  IF OnColumn(s, i) THEN DbCStrings.Copy(GetValue(s.result, s.row, i), out) END
+  IF OnColumn(s, i) THEN DbCStrings.Copy(ValueOf(s, i), out) END
 END ColumnText;
 
 PROCEDURE (s: Statement) ColumnBlob* (i: INTEGER; VAR out: ARRAY OF CHAR): LONGINT;
@@ -622,8 +659,8 @@ BEGIN
     IF p = 0 THEN Db.SetError(s.conn, Db.errDriver, "DbPostgres: out of memory"); RETURN 0 END;
     wide := bytes; length := SHORT(wide)   (* a bytea holds at most 1 GB *)
   ELSE
-    p := GetValue(s.result, s.row, i);
-    length := GetLength(s.result, s.row, i)
+    p := ValueOf(s, i);
+    length := GetLength(s.result, s.row, i)   (* 1 for a boolean, as for its 1 or 0 *)
   END;
   n := length;
   IF n > LEN(out) THEN n := LEN(out) END;
@@ -634,6 +671,7 @@ END ColumnBlob;
 
 
 BEGIN
+  one := "1"; zero := "0";
   NEW(driver);
   Db.Register(driver, "postgres");
   NEW(alias);

@@ -94,6 +94,16 @@ a select changes nothing: ok
 UPDATE ... RETURNING counts once done: ok
 each run counts its own rows: ok
 
+== The connection's Changes
+insert 3: 3
+update none: 0
+update 3 returning: 3
+a duplicate key: 0 (Exec failed)
+delete 1: 1
+create: 0
+drop: 0
+a prepared statement sets it when Step returns FALSE: ok
+
 == BLOBs
 insert a BLOB, an empty one and NULL: ok
 BindBlob of -1 bytes: FALSE err=3
@@ -105,6 +115,27 @@ BindBlob to parameter 3 of 2: FALSE err=3
 select BLOBs: ok
 text as a BLOB: length=3 bytes=65,100,97
 an integer as a BLOB: length=2 bytes=51,55
+
+== Booleans, dates and times
+inserted: ok
+id=1 b: type=1 int=1 text=[1] bool=TRUE
+  d: type=3 text=[2026-10-28] 2026/10/28 0:0:0.0
+  t: 2026/10/28 14:30:5.250
+id=2 b: type=1 int=0 text=[0] bool=FALSE
+  d: type=3 text=[0001-01-01] 1/1/1 0:0:0.0
+  t: 9999/12/31 23:59:59.999999
+id=3 b: type=1 int=1 text=[1] bool=TRUE
+  d: type=3 text=[2024-02-29] 2024/2/29 0:0:0.0
+  t: 2000/1/2 3:4:5.0
+id=4 b: type=0 int=0 text=[] bool=FALSE
+  d: type=0 text=[] 0/0/0 0:0:0.0
+  t: 0/0/0 0:0:0.0
+selected: ok
+compared with a bound boolean and date: ok
+compared with a bound time stamp: ok
+a comparison reads as 1 or 0: ok
+BindDate of February 30: FALSE err=3
+ColumnDateTime of 'abc': FALSE err=3
 
 == Long results
 a long result: rows=250 sum=31375 err=0

@@ -30,7 +30,8 @@ CONST
 TYPE
   Connection = POINTER TO ConnectionDesc;
   ConnectionDesc = RECORD (Db.ConnectionDesc)
-    db: SYSTEM.ADDRESS   (* sqlite3 *, or 0 once closed *)
+    db: SYSTEM.ADDRESS;   (* sqlite3 *, or 0 once closed *)
+    changes: HUGEINT      (* the Changes of the last statement to finish *)
   END;
 
   Statement = POINTER TO StatementDesc;
@@ -173,7 +174,7 @@ BEGIN
   WHILE (i < LEN(url)) & (url[i] # 0X) DO path[k] := url[i]; INC(k); INC(i) END;
   path[k] := 0X;
 
-  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.db := 0;
+  NEW(c); c.err := Db.noError; c.msg[0] := 0X; c.db := 0; c.changes := 0;
   result := OpenDatabase(SYSTEM.ADR(path[0]), SYSTEM.ADR(c.db), openReadWrite + openCreate, 0);
   IF result # sqliteOk THEN
     IF c.db = 0 THEN Db.lastError := "DbSqlite: out of memory"
@@ -227,6 +228,14 @@ BEGIN
   s := st;
   RETURN TRUE
 END Prepare;
+
+PROCEDURE (c: Connection) Changes* (): HUGEINT;
+(* The rows changed by the last statement whose Step returned FALSE at the
+   end of its run; 0 if that run failed. *)
+BEGIN
+  c.err := Db.noError;
+  RETURN c.changes
+END Changes;
 
 
 (* ---- Statement: binding ---- *)
@@ -309,8 +318,9 @@ BEGIN
     ELSIF result = sqliteDone THEN
       (* sqlite3_changes64 is the last INSERT, UPDATE or DELETE's count,
          which may be another statement's if this one changed nothing *)
-      IF TotalChanges(s.db) # s.before THEN s.changes := ChangesOf(s.db) END
-    ELSE SetSqliteError(s.conn, Db.errSql, s.db)
+      IF TotalChanges(s.db) # s.before THEN s.changes := ChangesOf(s.db) END;
+      s.conn(Connection).changes := s.changes
+    ELSE SetSqliteError(s.conn, Db.errSql, s.db); s.conn(Connection).changes := 0
     END
   END;
   RETURN s.onRow

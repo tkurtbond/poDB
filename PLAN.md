@@ -419,6 +419,29 @@ The user asked for this on 2026-10-27.
 - No cancel: `PQcancel` could reach the server after the result has ended
   and cancel the next command instead.
 
+## After Phase 6: the connection's `Changes`; booleans, dates and times
+
+The user approved these on 2026-10-28:
+
+1. `conn.Changes(): HUGEINT`, abstract in `Db`. Each driver keeps the
+   `Changes` of the last statement whose `Step` returned FALSE at the end of
+   its run, or 0 if that run failed. `Exec` now steps its statement to the
+   end, so `conn.Changes()` after `Exec` is its count, `RETURNING` or not.
+2. `Db.DateTime`, `BindBool`, `BindDate`, `BindDateTime`, `ColumnBool`,
+   `ColumnDateTime` and their `ByName` forms, written once in `Db` on the
+   integer and text procedures. A boolean is 1 or 0; a date or time stamp
+   is ISO 8601 text. Invalid dates and unparsable values give `errRange`.
+3. The PostgreSQL driver reads a `boolean` as `typeInt`, 1 or 0, and sets
+   `DateStyle` to `ISO` when it connects.
+
+**Done.** Learned on the way:
+
+- PostgreSQL accepts the text `1` and `0` for a `boolean` parameter, so
+  `BindBool` needs nothing of the driver.
+- `ColumnDateTime` takes any number of fractional digits, since PostgreSQL
+  drops trailing zeros (`14:30:05.5`), and rejects a time zone offset, so
+  a `timestamptz` is an error instead of a silently shifted time.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer

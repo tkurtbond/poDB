@@ -60,6 +60,11 @@ BEGIN
   Out.String("mock: close"); Out.Ln
 END Close;
 
+PROCEDURE (c: Connection) Changes* (): HUGEINT;
+BEGIN
+  RETURN changes
+END Changes;
+
 PROCEDURE (c: Connection) Prepare* (sql: ARRAY OF CHAR; VAR s: Db.Statement): BOOLEAN;
   VAR st: Statement;
 BEGIN

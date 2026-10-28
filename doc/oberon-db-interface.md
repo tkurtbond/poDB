@@ -46,10 +46,10 @@ Oberon-2 has no dynamic loading, so a driver is only available if its module is 
 Oberon-2 has no interfaces, so abstraction is done with type-bound procedures on record types and type extension.
 
 - `Driver`: `Open(url): Connection`
-- `Connection`: `Close`, `Prepare`, plus `Exec`, `Begin`, `Commit`, `Rollback`
+- `Connection`: `Close`, `Prepare`, `Changes`, plus `Exec`, `Begin`, `Commit`, `Rollback`
 - `Statement`: parameter binding, stepping, and column access
 
-`Exec`, `Begin`, `Commit` and `Rollback` are written once in `Db`, on top of `Prepare` and `Step` (the latter three issue the SQL `BEGIN`, `COMMIT` and `ROLLBACK`). A driver therefore only has to implement `Open`, `Close`, `Prepare` and the `Statement` methods.
+`Exec`, `Begin`, `Commit` and `Rollback` are written once in `Db`, on top of `Prepare` and `Step` (the latter three issue the SQL `BEGIN`, `COMMIT` and `ROLLBACK`). A driver therefore only has to implement `Open`, `Close`, `Prepare`, `Changes` and the `Statement` methods. The procedures for booleans, dates and times (section 2.9) are written once in `Db` too, on top of the integer and text procedures.
 
 ### 2.3 API summary
 
@@ -59,7 +59,8 @@ Oberon-2 has no interfaces, so abstraction is done with type-bound procedures on
 | `Db.Register(driver, scheme)` | Called by a driver at module initialisation |
 | `conn.Close` | Close the connection |
 | `conn.Prepare(sql, VAR stmt): BOOLEAN` | Prepare a statement |
-| `conn.Exec(sql): BOOLEAN` | Run a parameterless statement, ignoring any result row |
+| `conn.Exec(sql): BOOLEAN` | Run a parameterless statement to its end, ignoring any result rows |
+| `conn.Changes(): HUGEINT` | Rows inserted, updated or deleted by the last statement whose `Step` returned FALSE at the end of its run, `Exec`'s included; 0 if that run failed |
 | `conn.Begin() / Commit() / Rollback()` | Transactions |
 | `stmt.BindNull(i)` / `BindInt(i, v)` / `BindReal(i, v)` / `BindText(i, v)` | Bind parameters by number (1-based) |
 | `stmt.BindBlob(i, VAR v, n)` | Bind the `n` bytes `v[0]` … `v[n-1]`, which may include `0X`, as a BLOB (`bytea` on PostgreSQL); `n` outside `0` … `LEN(v)` sets `errRange` |
@@ -75,6 +76,10 @@ Oberon-2 has no interfaces, so abstraction is done with type-bound procedures on
 | `stmt.ColumnIsNull(i): BOOLEAN` | TRUE if the value is NULL; written once in `Db`, on `ColumnType` |
 | `stmt.ColumnIndex(name): INTEGER` | 0-based number for a column name (case-insensitive), or -1 |
 | `stmt.ColumnIntByName(n)` / `ColumnRealByName(n)` / `ColumnTextByName(n, VAR buf)` / `ColumnBlobByName(n, VAR buf)` / `ColumnTypeByName(n)` / `ColumnIsNullByName(n)` | Read column values by name; unknown name sets `conn.err` to `errRange` (and `ColumnIsNullByName` returns TRUE) |
+| `stmt.BindBool(i, v)` / `ColumnBool(i): BOOLEAN` | A boolean, bound as 1 or 0, read as `ColumnInt(i) # 0` (section 2.9) |
+| `stmt.BindDate(i, d)` / `BindDateTime(i, d)` | Bind a `Db.DateTime` as ISO 8601 text, `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS[.ffffff]`; an invalid date or time sets `errRange` |
+| `stmt.ColumnDateTime(i, VAR d)` | Parse a date or time stamp in ISO 8601 form into `d`; NULL gives all fields 0, and so does any other value, with `errRange` |
+| `BindBoolByName`, `BindDateByName`, `BindDateTimeByName`, `ColumnBoolByName`, `ColumnDateTimeByName` | The same by name |
 
 Column type codes: `typeNull`, `typeInt`, `typeReal`, `typeText`, `typeBlob`.
 Error codes: `noError`, `errConnect`, `errSql`, `errRange`, `errDriver`.
@@ -88,7 +93,8 @@ Error codes: `noError`, `errConnect`, `errSql`, `errRange`, `errDriver`.
 - `Finalize` and `Close` are the exceptions: they leave `c.err` as it is, so that `Exec` (`Prepare`, `Step`, `Finalize`) can report an error from `Step`, and so that a loop's error survives finalizing its statement.
 - `Step` returns TRUE when a row is available and FALSE when the statement is finished **or** failed. Callers check `c.err` after a stepping loop.
 - `ColumnText` copies into the caller's buffer and truncates if the buffer is too small. `ColumnBlob` does too, and returns the value's whole length.
-- `Changes` counts only the rows the statement itself inserted, updated or deleted, and only once `Step` has returned FALSE. `Reset` sets it back to 0. There is no count for `Exec`, which discards its statement; prepare the statement to get one.
+- `Changes` counts only the rows the statement itself inserted, updated or deleted, and only once `Step` has returned FALSE. `Reset` sets it back to 0.
+- The connection's `Changes` is set whenever a statement's `Step` returns FALSE at the end of its run: to that statement's `Changes`, or to 0 if the run failed. A statement that fails in `Prepare` never runs and leaves it as it was, so check `Exec`'s result before reading it. `Exec` steps its statement to the end, so a statement with `RETURNING` is counted whole.
 - Errors are reported by status code and message, since Oberon-2 has no exceptions.
 
 ### 2.5 Example usage
@@ -152,6 +158,22 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 - **Errors.** An unknown name sets `conn.err` to `errRange` and returns 0 or an empty string. `ColumnTypeByName` returns `typeNull` in that case, so check `conn.err` to tell that apart from a real NULL column.
 - **Cost.** Each by-name call searches the column names. That is fine for ordinary use. In a loop over a large result, call `ColumnIndex` once before the loop and use the numbered readers inside it.
 
+### 2.9 Booleans, dates and times
+
+Neither SQLite nor the interface has a boolean or a date type code, and the two databases store such values differently. `Db` adds procedures for them, written once on top of the integer and text procedures, so no driver implements them:
+
+```oberon
+DateTime* = RECORD
+  year*, month*, day*: INTEGER;      (* 1 .. 9999, 1 .. 12, 1 .. 31 *)
+  hour*, minute*, second*: INTEGER;  (* 0 .. 23, 0 .. 59, 0 .. 59 *)
+  microsecond*: LONGINT              (* 0 .. 999999 *)
+END;
+```
+
+- **Booleans.** `BindBool` binds 1 or 0 with `BindInt`. SQLite stores the integer, and PostgreSQL accepts the text `1` or `0` for a `boolean` parameter. `ColumnBool` is `ColumnInt(i) # 0`, and the PostgreSQL driver reads a `boolean` as `typeInt` with the value 1 or 0, as SQLite stores it, so a comparison such as `SELECT a = b` reads the same on both.
+- **Dates and time stamps.** `BindDate` binds `YYYY-MM-DD`, ignoring the time; `BindDateTime` binds `YYYY-MM-DD HH:MM:SS`, with `.ffffff` when the microseconds are not 0. Both check the date against the Gregorian calendar (leap years included) and the time's ranges, and set `errRange` instead of binding an invalid value. SQLite stores the text, which sorts and compares in date order and which its date functions understand. PostgreSQL takes it for a `date` or `timestamp`, and the driver sets `DateStyle` to `ISO` when it connects, so the server sends values back in the same form. `ColumnDateTime` parses `YYYY-MM-DD`, optionally followed by a space or `T`, `HH:MM`, `:SS` and a fraction of any length (digits beyond the sixth are dropped). A date alone has the time 00:00:00. Anything else, such as a value with a time zone, gives all fields 0 and `errRange`.
+- There are no time zones. Declare such columns `DATE` or `TIMESTAMP`, not `TIMESTAMPTZ`, and keep the values in one zone, such as UTC.
+
 ## 3. What each driver has to do
 
 ### SQLite
@@ -162,7 +184,7 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 | `Prepare` | `Db.Translate(sql, "?", …)`, then `sqlite3_prepare_v2` |
 | `Bind*` | `sqlite3_bind_null`, `sqlite3_bind_int64`, `sqlite3_bind_double`, `sqlite3_bind_text`, `sqlite3_bind_blob` (`sqlite3_bind_zeroblob` for 0 bytes) |
 | `Step` | `sqlite3_step` (`SQLITE_ROW` means a row, `SQLITE_DONE` means finished) |
-| `Changes` | `sqlite3_changes64`, if `sqlite3_total_changes64` moved during the run (otherwise the count is another statement's) |
+| `Changes` | `sqlite3_changes64`, if `sqlite3_total_changes64` moved during the run (otherwise the count is another statement's); the connection's `Changes` is the last finished statement's, kept in the connection |
 | `ColumnCount` / `ColumnName` | `sqlite3_column_count` / `sqlite3_column_name` |
 | `Column*` | `sqlite3_column_type`, `_int64`, `_double`, `_text`, `_blob` and `_bytes` |
 | `Reset` / `Finalize` | `sqlite3_reset` / `sqlite3_finalize` |
@@ -173,13 +195,13 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 
 | `Db` operation | libpq API |
 |---|---|
-| `Open` | `PQconnectdb` / `PQstatus` |
+| `Open` | `PQconnectdb` / `PQstatus`, then `SET DateStyle TO ISO` with `PQexec` |
 | `Prepare` | `Db.Translate(sql, "$", …)`, then `PQprepare` with `nParams` = `s.params.n`, under a name unique on the connection (`podb_1`, `podb_2`, …), then `PQdescribePrepared` |
 | `Bind*` | Collect parameters as text in the driver; numbers are formatted to text. `BindBlob`'s bytes go in binary format, the one exception to D6 |
 | `Step` | First call sends the statement with `PQsendQueryPrepared` and asks for `PQsetChunkedRowsMode`; later calls advance a row cursor over the current chunk, and read the next with `PQgetResult` |
 | `ColumnCount` / `ColumnName` | `PQnfields` / `PQfname` on the description, so they work before the first `Step` |
-| `Changes` | `PQcmdTuples`, when `PQcmdStatus` is an `INSERT`, `UPDATE`, `DELETE` or `MERGE` |
-| `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype`; numbers are parsed from text, and `ColumnBlob` unescapes a `bytea` with `PQunescapeBytea` |
+| `Changes` | `PQcmdTuples`, when `PQcmdStatus` is an `INSERT`, `UPDATE`, `DELETE` or `MERGE`; the connection's `Changes` is the last finished statement's, kept in the connection |
+| `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype`; numbers are parsed from text, a `boolean`'s `t` or `f` reads as `1` or `0`, and `ColumnBlob` unescapes a `bytea` with `PQunescapeBytea` |
 | `Finalize` | `PQclear`, then `PQclosePrepared` (libpq 17 or later), which deallocates the statement even in a failed transaction, where `DEALLOCATE` is refused |
 | `Close` | `PQfinish` |
 | Error messages | `PQerrorMessage` |
@@ -191,10 +213,10 @@ ODBC (for example unixODBC) is an alternative single driver that could cover bot
 ## 4. Portability limits a wrapper cannot remove
 
 - **Auto-increment keys.** `INTEGER PRIMARY KEY` auto-increments in SQLite but not in PostgreSQL. The demo supplies ids explicitly. `INSERT ... RETURNING id` works on both (SQLite 3.35 or later).
-- **Typing.** SQLite is loosely typed, while PostgreSQL enforces column types and is stricter about booleans, dates and quoting. Keep to plain `INTEGER`, `TEXT` and `REAL` columns while developing on SQLite, and test against PostgreSQL early. For binary data declare the column `BYTEA`: it is PostgreSQL's type, and SQLite accepts the name and stores a bound BLOB unchanged. `BindBlob` sends binary data, which suits only such a column.
+- **Typing.** SQLite is loosely typed, while PostgreSQL enforces column types and is stricter about booleans, dates and quoting. Keep to plain `INTEGER`, `TEXT` and `REAL` columns while developing on SQLite, and test against PostgreSQL early. For booleans, dates and time stamps use `BOOLEAN`, `DATE` and `TIMESTAMP` with the procedures of section 2.9. For binary data declare the column `BYTEA`: it is PostgreSQL's type, and SQLite accepts the name and stores a bound BLOB unchanged. `BindBlob` sends binary data, which suits only such a column.
 - **Placeholder syntax.** `Db.Translate` hides the `?` / `:name` / `$n` differences, but it is a simple scanner, not a full SQL parser (see section 2.6 for what it skips and what it does not handle).
 - **Integer width.** The interface uses `HUGEINT` for integer values, which is 64 bits in poc under both size models, as are both databases' largest integers.
-- **Reading a value as the wrong type.** SQLite converts any value to the type asked for: `ColumnInt` of the text `'abc'` is 0, with no error. The PostgreSQL driver parses the value's text, so `ColumnInt` of text that is not a number is 0 with `errRange`. Both truncate a real number toward zero for `ColumnInt`. A PostgreSQL `boolean` reads as the text `t` or `f`, where SQLite stores 1 or 0.
+- **Reading a value as the wrong type.** SQLite converts any value to the type asked for: `ColumnInt` of the text `'abc'` is 0, with no error. The PostgreSQL driver parses the value's text, so `ColumnInt` of text that is not a number is 0 with `errRange`. Both truncate a real number toward zero for `ColumnInt`.
 - **Dialect features.** Date and time functions, upsert syntax (`ON CONFLICT`), and concurrency and locking behaviour differ. Stay within the common SQL subset, or isolate dialect-specific statements in one module.
 - **Concurrency.** SQLite allows one writer at a time. PostgreSQL's multi-user behaviour may expose problems that never appear in single-user SQLite testing.
 - **Result streaming.** The PostgreSQL driver streams a result in chunks, but only while the program runs no other statement on the connection. A statement run during a loop over another's rows makes the driver read the rest of the outer result into memory. For a very large result, use a second connection for the inner statements. `Reset` or `Finalize` partway through a result still reads and discards the rest of it.
@@ -257,6 +279,7 @@ These were decided while planning the implementation (on 2026-10-27):
 - **Column names up to 127 characters** (`maxColumnName`), not 63. PostgreSQL's limit is 63 bytes, but SQLite has none, and an expression gives a long name.
 - **Streaming PostgreSQL results** (2026-10-27): the driver reads a result in chunks of 100 rows (`PQsetChunkedRowsMode`, libpq 17), as section 3 describes.
 - **Additions to the interface** (2026-10-27): `typeBlob`, `BindBlob`, `ColumnBlob`, `Changes`, `ColumnIsNull`, and their `ByName` forms. `Translate` handles dollar-quoted strings.
+- **Booleans, dates and times, and the connection's `Changes`** (2026-10-28): `DateTime`, `BindBool`, `BindDate`, `BindDateTime`, `ColumnBool`, `ColumnDateTime` and their `ByName` forms (section 2.9), and `Connection.Changes`. `Exec` now steps its statement to the end instead of once. The PostgreSQL driver reads a `boolean` as the integer 1 or 0.
 - **`Db.Open`** checks the scheme's length before copying it, rejects a URL with no scheme, sets `lastError` to `""` on success, and sets it to a message if a driver returns NIL without one.
 
 `examples/DbDemo.Mod` differs from `doc/DbDemo.Mod` only in its use of `HUGEINT`, in taking an optional URL from the command line, in importing both drivers, and in deleting the table's rows first so that it can run twice on one file.

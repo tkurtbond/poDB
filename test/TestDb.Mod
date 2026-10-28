@@ -1,7 +1,8 @@
 MODULE TestDb;
 (* Tests of Db's own logic, with MockDriver standing in for a database:
    placeholder translation, opening by scheme, binding by name, reading
-   columns by name, and Exec, Begin, Commit and Rollback.  It prints one or
+   columns by name, Exec, Begin, Commit and Rollback, and booleans, dates
+   and times.  It prints one or
    more lines per case; make check compares them with TestDb.expected. *)
 
 IMPORT Db, Out, MockDriver;
@@ -304,8 +305,112 @@ BEGIN
   MockDriver.changes := 3;
   ok := conn.Prepare("DELETE", st);
   Out.String("Changes="); Out.Int(st.Changes(), 0); Out.Ln;
-  st.Finalize
+  st.Finalize;
+  Out.String("conn.Changes="); Out.Int(conn.Changes(), 0); Out.Ln;
+  MockDriver.columns := 1; MockDriver.rows := 2;
+  MockDriver.value[0, 0] := "1"; MockDriver.value[1, 0] := "2";
+  Out.String("Exec of two rows steps to the end:"); Out.Ln;
+  ok := conn.Exec("SELECT");
+  Out.String("Exec SELECT: "); Bool(ok); ShowError(conn)
 END TestExec;
+
+
+(* ---- Booleans, dates and times ---- *)
+
+PROCEDURE SetDateTime (VAR d: Db.DateTime; year, month, day, hour, minute, second: INTEGER;
+    microsecond: LONGINT);
+BEGIN
+  d.year := year; d.month := month; d.day := day;
+  d.hour := hour; d.minute := minute; d.second := second; d.microsecond := microsecond
+END SetDateTime;
+
+PROCEDURE ShowDateTime (VAR d: Db.DateTime);
+BEGIN
+  Out.Int(d.year, 0); Out.Char("/"); Out.Int(d.month, 0); Out.Char("/"); Out.Int(d.day, 0);
+  Out.Char(" "); Out.Int(d.hour, 0); Out.Char(":"); Out.Int(d.minute, 0); Out.Char(":");
+  Out.Int(d.second, 0); Out.Char("."); Out.Int(d.microsecond, 0)
+END ShowDateTime;
+
+PROCEDURE ReadValue (text: ARRAY OF CHAR);
+(* Show what ColumnBool and ColumnDateTime make of a column holding text. *)
+  VAR ok: BOOLEAN; d: Db.DateTime;
+BEGIN
+  MockDriver.columns := 1; MockDriver.rows := 1; MockDriver.columnName[0] := "v";
+  COPY(text, MockDriver.value[0, 0]);
+  ok := conn.Prepare("SELECT", st);
+  IF st.Step() THEN
+    Out.String("  ["); Out.String(text); Out.String("] bool="); Bool(st.ColumnBoolByName("V"));
+    st.ColumnDateTimeByName("v", d);
+    Out.String(" date="); ShowDateTime(d); ShowError(conn)
+  END;
+  st.Finalize
+END ReadValue;
+
+PROCEDURE TestTypes;
+  VAR ok: BOOLEAN; d: Db.DateTime;
+BEGIN
+  Heading("Booleans, dates and times");
+  ok := conn.Prepare("SELECT :b, :d", st);
+  st.BindBoolByName("b", TRUE); ShowError(conn);
+  st.BindBool(1, FALSE); ShowError(conn);
+  SetDateTime(d, 2026, 10, 28, 14, 30, 5, 0);
+  st.BindDateByName("d", d); ShowError(conn);
+  st.BindDateTimeByName("d", d); ShowError(conn);
+  SetDateTime(d, 1, 1, 1, 0, 0, 0, 5);
+  st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2024, 2, 29, 23, 59, 59, 999999);
+  st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2000, 2, 29, 0, 0, 0, 0);
+  st.BindDate(2, d); ShowError(conn);
+  Out.String("invalid:"); Out.Ln;
+  SetDateTime(d, 2023, 2, 29, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 1900, 2, 29, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 4, 31, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 10000, 1, 1, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 0, 1, 1, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 13, 1, 0, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 1, 1, 24, 0, 0, 0); st.BindDate(2, d); ShowError(conn);
+  st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 1, 1, 0, 60, 0, 0); st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 1, 1, 0, 0, 60, 0); st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 1, 1, 0, 0, 0, 1000000); st.BindDateTime(2, d); ShowError(conn);
+  SetDateTime(d, 2026, 1, 1, 0, 0, 0, -1); st.BindDateTime(2, d); ShowError(conn);
+  st.BindBoolByName("zz", TRUE); ShowError(conn);
+  st.BindDateByName("zz", d); ShowError(conn);
+  st.BindDateTimeByName("zz", d); ShowError(conn);
+  st.Finalize;
+
+  Out.String("reading:"); Out.Ln;
+  ReadValue("1");
+  ReadValue("0");
+  ReadValue("-2");
+  ReadValue("NULL");
+  ReadValue("2026-10-28");
+  ReadValue("2026-10-28 14:30:05");
+  ReadValue("2026-10-28T14:30:05");
+  ReadValue("2026-10-28 14:30");
+  ReadValue("2024-02-29 23:59:59.5");
+  ReadValue("2024-02-29 23:59:59.000250");
+  ReadValue("2024-02-29 23:59:59.1234567");
+  ReadValue("2026-10-28 14:30:05+02");
+  ReadValue("2026-10-28 14:30:05.");
+  ReadValue("2026-10-28 ");
+  ReadValue("2026-10-28 14");
+  ReadValue("2026-10-28 14:30:5");
+  ReadValue("2026-1-28");
+  ReadValue("2023-02-29");
+  ReadValue("2026-10-28 24:00:00");
+  ReadValue("abc");
+  ReadValue("");
+
+  ok := conn.Prepare("SELECT", st);
+  IF st.Step() THEN
+    Out.String("missing bool="); Bool(st.ColumnBoolByName("missing")); ShowError(conn);
+    st.ColumnDateTimeByName("missing", d);
+    Out.String("missing date="); ShowDateTime(d); ShowError(conn)
+  END;
+  st.Finalize
+END TestTypes;
 
 
 BEGIN
@@ -318,5 +423,6 @@ BEGIN
   TestBinding;
   TestColumns;
   TestExec;
+  TestTypes;
   conn.Close
 END TestDb.
