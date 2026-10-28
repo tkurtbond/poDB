@@ -1,0 +1,6 @@
+# Everything the build writes
+build/
+*.sym
+*.ll
+*.o
+*.c.o.d

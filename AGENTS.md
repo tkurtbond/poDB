@@ -108,10 +108,15 @@ reasons.
 
 ## Language rules for poDB's source
 
-- Write Oberon-2 as `Oberon2.pdf` defines it, as checked by `poc -strict`.
-  The **one adopted extension is `HUGEINT`**, for 64-bit integer values in
-  the public interface (`PLAN.md`, decision D1). Any other extension needs
-  the user's approval first.
+- Write Oberon-2 as `Oberon2.pdf` defines it. These poc extensions are
+  adopted, and any other needs the user's approval first:
+  - `HUGEINT`, for 64-bit integer values in the public interface (`PLAN.md`,
+    decision D1);
+  - `["C"]` external procedures and the `SYSTEM` types that C calls need
+    (`ADDRESS`, `INT32`, `INT64`, `CARD32`), only in modules that call C.
+- `poc -strict` counts all of these as extensions, so no module in `src/`
+  passes it: `Db` uses `HUGEINT`, and the others call C. `-strict` is
+  therefore not part of `make check`.
 - Index character arrays with `LONGINT`, not `INTEGER`. Under `-O2` an
   `INTEGER` stops at 32767, and SQL text or a column value can be longer.
 - Match the style of `doc/Db.Mod`: two-space indentation, a comment under
@@ -134,8 +139,7 @@ reasons.
 
 - `make`: build the poDB libraries under both size models in `build/`.
 - `make check`: run every test that needs no server (the `Db` unit tests and
-  the SQLite driver) under `-O2` and `-OC`, plus `poc -strict -check` of
-  every module that does not use `HUGEINT`.
+  the SQLite driver) under `-O2` and `-OC`.
 - `make check-postgres`: start the test cluster (if it is not running), run
   the PostgreSQL and cross-driver tests, then stop it.
 - `make check-all`: `check` plus `check-postgres`.

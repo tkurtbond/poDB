@@ -105,7 +105,6 @@ The user decided all of them on 2026-10-27.
      always ends with 0X, and treats NIL as "".
    - `Fits(p; VAR out): BOOLEAN`, so a caller can find out that a value was
      truncated.
-   This module uses no `HUGEINT`, so it also passes `-strict`.
 3. Write `test/MockDriver.Mod`, a driver for the scheme `mock:` that keeps
    canned rows in memory and records every bind call it receives. It tests
    all of `Db`'s shared logic with no database present.
@@ -124,8 +123,7 @@ The user decided all of them on 2026-10-27.
      duplicate names, an unknown name, and a 63-character name.
    - **`Exec`, `Begin`, `Commit` and `Rollback`**, through the mock driver.
 
-**Done when** `TestDb` passes under both models, and `DbCStrings` passes
-`poc -strict -check`.
+**Done when** `TestDb` passes under both models.
 
 ## Phase 2: `DbSqlite`
 
@@ -302,5 +300,7 @@ test prints the same line for both databases.
   `-O2` and `-OC`.
 - Each test program prints deterministic lines that are compared with an
   `.expected` file. A test that fails shows the diff.
-- `poc -strict -check` for every module except those that use `HUGEINT` (D1).
+- No `-strict` check: poc counts `HUGEINT` (D1), `["C"]` procedures and
+  `SYSTEM.ADDRESS` as extensions, so every module in `src/` fails it (found
+  in Phase 0).
 - Build the tests with `-trap-location`, so that a trap names its line.
