@@ -84,6 +84,15 @@ BEGIN
   s[i] := 0X
 END Repeat;
 
+PROCEDURE Append (VAR s: ARRAY OF CHAR; t: ARRAY OF CHAR);
+  VAR i, k: LONGINT;
+BEGIN
+  i := 0;
+  WHILE s[i] # 0X DO INC(i) END;
+  k := 0;
+  REPEAT s[i] := t[k]; INC(i); INC(k) UNTIL t[k - 1] = 0X
+END Append;
+
 PROCEDURE Spell (VAR s: ARRAY OF CHAR; t: ARRAY OF CHAR);
 (* s := t with ` spelled as ', ~ as " and | as a line feed, since an Oberon
    string cannot hold a quote of its own kind or a control character *)
@@ -126,6 +135,20 @@ BEGIN
   Translate("31-character name", sql, "?", out);
   Repeat(sql, "SELECT :", "a", "", 32);
   Translate("32-character name", sql, "?", out);
+  Translate("dollar quotes", "SELECT $$ ? :x 'it -- $$, ?", "$", out);
+  Translate("tagged dollar quotes", "SELECT $f$ $$ ? $g$ $f$ || :a", "$", out);
+  Translate("dollar quotes with no space", "SELECT 1, $$?$$, :a", "$", out);
+  Translate("not dollar quotes", "SELECT a$b$, $1, c$$ FROM t WHERE x = :x", "$", out);
+  Translate("dollar quote unterminated", "SELECT $q$ ? $$ :a", "$", out);
+  Repeat(sql, "SELECT $", "a", "", 31);
+  Append(sql, "$ ? $");
+  Repeat(out, "", "a", "", 31);
+  Append(sql, out); Append(sql, "$ ?");
+  Translate("31-character dollar tag", sql, "$", out);
+  Repeat(sql, "SELECT $", "a", "", 32);
+  Translate("32 characters after $, no closing $", sql, "$", out);
+  Append(sql, "$$");
+  Translate("32-character dollar tag", sql, "$", out);
   Translate("output fits exactly", "SELECT ?", "?", out10);
   Translate("output one too small", "SELECT ?", "?", out9);
 
@@ -182,7 +205,7 @@ END TestOpen;
 (* ---- Binding by name ---- *)
 
 PROCEDURE TestBinding;
-  VAR ok: BOOLEAN;
+  VAR ok: BOOLEAN; blob: ARRAY 3 OF CHAR;
 BEGIN
   Heading("Binding by name");
   ok := conn.Prepare("SELECT * FROM t WHERE a = :a AND b = :b OR c = :a", st);
@@ -196,6 +219,9 @@ BEGIN
   st.BindTextByName("b", "Ada"); ShowError(conn);
   st.BindRealByName("a", 1.5D0); ShowError(conn);
   st.BindNullByName("b"); ShowError(conn);
+  blob[0] := 1X; blob[1] := 0X; blob[2] := 0FFX;
+  st.BindBlobByName("a", blob, 3); ShowError(conn);
+  st.BindBlobByName("zz", blob, 3); ShowError(conn);
   st.BindIntByName("zz", 1); ShowError(conn);
   st.BindIntByName("A", 1); ShowError(conn);   (* parameter names match exactly *)
   st.Finalize;
@@ -248,7 +274,12 @@ BEGIN
     Out.String("  missing text=["); Out.String(text); Out.String("]"); ShowError(conn);
     Out.String("  missing type="); Out.Int(st.ColumnTypeByName("missing"), 0); ShowError(conn);
     st.ColumnTextByName("name", short);
-    Out.String("  name in 3 characters=["); Out.String(short); Out.String("]"); Out.Ln
+    Out.String("  name in 3 characters=["); Out.String(short); Out.String("]"); Out.Ln;
+    Out.String("  IsNull name="); Bool(st.ColumnIsNullByName("name"));
+    Out.String(" id="); Bool(st.ColumnIsNull(0));
+    Out.String(" BlobByName name="); Out.Int(st.ColumnBlobByName("name", short), 0); Out.Ln;
+    Out.String("  missing IsNull="); Bool(st.ColumnIsNullByName("missing")); ShowError(conn);
+    Out.String("  missing blob="); Out.Int(st.ColumnBlobByName("missing", short), 0); ShowError(conn)
   END;
   ShowError(conn);
   st.Finalize
@@ -269,7 +300,11 @@ BEGIN
   Out.String("Exec STEPFAIL: "); Bool(conn.Exec("STEPFAIL")); ShowError(conn);
   Out.String("Exec bad placeholders: "); Bool(conn.Exec("SELECT ?, :a")); ShowError(conn);
   ok := conn.Exec("CREATE TABLE t (a INTEGER)");
-  Out.String("Exec CREATE: "); Bool(ok); ShowError(conn)
+  Out.String("Exec CREATE: "); Bool(ok); ShowError(conn);
+  MockDriver.changes := 3;
+  ok := conn.Prepare("DELETE", st);
+  Out.String("Changes="); Out.Int(st.Changes(), 0); Out.Ln;
+  st.Finalize
 END TestExec;
 
 

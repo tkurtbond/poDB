@@ -3,7 +3,8 @@ MODULE MockDriver;
    prints each call it receives, so a test's output shows what Db passed to
    the driver, and it returns the rows the test puts in columnName and value.
    Values are text; ColumnType calls "NULL" typeNull, an integer typeInt and
-   anything else typeText.
+   anything else typeText.  ColumnBlob gives a value's characters, and
+   Changes gives changes.
 
    Special URLs: "mock:fail" fails with a message in Db.lastError, and
    "mock:silent" fails without one.  Special SQL: "FAIL" fails in Prepare and
@@ -30,6 +31,7 @@ TYPE
 
 VAR
   columns*, rows*: INTEGER;
+  changes*: HUGEINT;
   columnName*: ARRAY maxColumns OF ARRAY 128 OF CHAR;
   value*: ARRAY maxRows, maxColumns OF ARRAY 32 OF CHAR;
   driver: Driver;
@@ -115,6 +117,16 @@ BEGIN
   IF CheckParam(s, i) THEN ShowBind("text", i); Out.String(" = "); Out.String(v); Out.Ln END
 END BindText;
 
+PROCEDURE (s: Statement) BindBlob* (i: INTEGER; VAR v: ARRAY OF CHAR; n: LONGINT);
+  VAR k: LONGINT;
+BEGIN
+  IF CheckParam(s, i) THEN
+    ShowBind("blob", i); Out.String(" =");
+    FOR k := 0 TO n - 1 DO Out.Char(" "); Out.Int(ORD(v[k]), 0) END;
+    Out.Ln
+  END
+END BindBlob;
+
 PROCEDURE (s: Statement) Step* (): BOOLEAN;
 BEGIN
   s.conn.err := Db.noError;
@@ -198,8 +210,25 @@ BEGIN
   END
 END ColumnText;
 
+PROCEDURE (s: Statement) ColumnBlob* (i: INTEGER; VAR out: ARRAY OF CHAR): LONGINT;
+  VAR k: LONGINT;
 BEGIN
-  columns := 0; rows := 0;
+  IF ~CheckColumn(s, i) OR (value[s.row, i] = "NULL") THEN RETURN 0 END;
+  k := 0;
+  WHILE value[s.row, i][k] # 0X DO
+    IF k < LEN(out) THEN out[k] := value[s.row, i][k] END;
+    INC(k)
+  END;
+  RETURN k
+END ColumnBlob;
+
+PROCEDURE (s: Statement) Changes* (): HUGEINT;
+BEGIN
+  RETURN changes
+END Changes;
+
+BEGIN
+  columns := 0; rows := 0; changes := 0;
   NEW(driver);
   Db.Register(driver, "mock")
 END MockDriver.

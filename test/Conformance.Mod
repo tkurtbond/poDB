@@ -8,7 +8,8 @@ MODULE Conformance;
    It imports both drivers, so the URL alone picks the driver.
 
    It uses only SQL that SQLite and PostgreSQL both accept (design, section
-   4), works in a table of its own, podb_conformance, and prints one line per
+   4), works in tables of its own, podb_conformance and podb_blobs (BYTEA is
+   PostgreSQL's BLOB type, and a name SQLite accepts), and prints one line per
    case, which make compares with Conformance.expected.  Error messages
    differ between databases, so it prints error codes, never messages. *)
 
@@ -261,6 +262,7 @@ BEGIN
     Out.String(" text=["); Out.String(text); Out.String("] int="); Out.Int(s.ColumnInt(1), 0);
     Out.Ln;
     Check("NULL as a real is 0", s.ColumnReal(2) = 0.0D0);
+    Check("ColumnIsNull", s.ColumnIsNull(0) & s.ColumnIsNull(2) & s.ColumnIsNullByName("N"));
     Check("reading NULL is no error", conn.err = Db.noError)
   ELSE
     Check("step", FALSE)
@@ -268,6 +270,7 @@ BEGIN
   s.Finalize;
   Prepare("SELECT COUNT(*) FROM podb_conformance WHERE name IS NULL AND id = 30", s);
   Check("IS NULL", s.Step() & (s.ColumnInt(0) = 1));
+  Check("ColumnIsNull of a value", ~s.ColumnIsNull(0) & (conn.err = Db.noError));
   s.Finalize
 END TestNull;
 
@@ -396,6 +399,127 @@ BEGIN
 END TestReturning;
 
 
+(* ---- Changes ---- *)
+
+PROCEDURE Changes (label, sql: ARRAY OF CHAR);
+(* Run sql, which returns no rows, and print Changes before and after. *)
+  VAR s: Db.Statement; before: HUGEINT; ok: BOOLEAN;
+BEGIN
+  Prepare(sql, s);
+  before := s.Changes();
+  ok := ~s.Step() & (conn.err = Db.noError);
+  Out.String(label); Out.String(": "); Out.Int(before, 0); Out.String(" then ");
+  Out.Int(s.Changes(), 0);
+  s.Reset;
+  Out.String(", after Reset "); Out.Int(s.Changes(), 0);
+  IF ~ok THEN Out.String(" FAIL") END;
+  Out.Ln;
+  s.Finalize
+END Changes;
+
+PROCEDURE TestChanges;
+  VAR s: Db.Statement; ok: BOOLEAN;
+BEGIN
+  Heading("Changes");
+  Changes("insert", "INSERT INTO podb_conformance (id, name) VALUES (70, 'c'), (71, 'c'), (72, 'c')");
+  Changes("update 3", "UPDATE podb_conformance SET n = 7 WHERE name = 'c'");
+  Changes("update none", "UPDATE podb_conformance SET n = 7 WHERE id < 0");
+  Changes("select", "SELECT id FROM podb_conformance WHERE id < 0");
+  Changes("delete 2", "DELETE FROM podb_conformance WHERE id IN (70, 71)");
+  Changes("create", "CREATE TABLE podb_changes (a INTEGER)");
+  Changes("drop", "DROP TABLE podb_changes");
+
+  Prepare("SELECT id FROM podb_conformance WHERE id = 72", s);
+  ok := s.Step() & (s.Changes() = 0) & ~s.Step() & (s.Changes() = 0);
+  s.Finalize;
+  Check("a select changes nothing", ok);
+
+  Prepare("UPDATE podb_conformance SET n = 8 WHERE id = 72 RETURNING id", s);
+  ok := s.Step() & (s.Changes() = 0) & ~s.Step() & (s.Changes() = 1) & (conn.err = Db.noError);
+  s.Finalize;
+  Check("UPDATE ... RETURNING counts once done", ok);
+
+  Prepare("DELETE FROM podb_conformance WHERE id = ?", s);
+  s.BindInt(1, 72);
+  ok := ~s.Step() & (s.Changes() = 1);
+  s.Reset; s.BindInt(1, 72);
+  ok := ok & ~s.Step() & (s.Changes() = 0);
+  s.Finalize;
+  Check("each run counts its own rows", ok)
+END TestChanges;
+
+
+(* ---- BLOBs ---- *)
+
+PROCEDURE ShowBlob (VAR b: ARRAY OF CHAR; n: LONGINT);
+  VAR k: LONGINT;
+BEGIN
+  Out.String(" bytes=");
+  FOR k := 0 TO n - 1 DO
+    IF k > 0 THEN Out.Char(",") END;
+    Out.Int(ORD(b[k]), 0)
+  END
+END ShowBlob;
+
+PROCEDURE TestBlobs;
+  VAR s: Db.Statement; blob, back: ARRAY 8 OF CHAR; short: ARRAY 2 OF CHAR;
+      n: LONGINT; ok: BOOLEAN;
+BEGIN
+  Heading("BLOBs");
+  Setup("CREATE TABLE podb_blobs (id INTEGER PRIMARY KEY, b BYTEA)");
+  blob[0] := 0X; blob[1] := 1X; blob[2] := 0FFX; blob[3] := 0X; blob[4] := "A";
+  blob[5] := "\"; blob[6] := "'"; blob[7] := 0X;
+  Prepare("INSERT INTO podb_blobs (id, b) VALUES (:id, :b)", s);
+  s.BindIntByName("id", 1); s.BindBlobByName("b", blob, 7);
+  ok := ~s.Step() & (conn.err = Db.noError);
+  s.Reset;
+  s.BindIntByName("id", 2); s.BindBlob(2, blob, 0);
+  ok := ok & ~s.Step() & (conn.err = Db.noError);
+  s.Reset;
+  s.BindIntByName("id", 3); s.BindNull(2);
+  ok := ok & ~s.Step() & (conn.err = Db.noError);
+  Check("insert a BLOB, an empty one and NULL", ok);
+
+  s.Reset;
+  s.BindBlob(2, blob, -1);
+  Error("BindBlob of -1 bytes", FALSE);
+  s.BindBlob(2, blob, 9);
+  Error("BindBlob of 9 bytes from 8", FALSE);
+  s.BindBlob(3, blob, 1);
+  Error("BindBlob to parameter 3 of 2", FALSE);
+  s.Finalize;
+
+  Prepare("SELECT id, b FROM podb_blobs ORDER BY id", s);
+  WHILE s.Step() DO
+    back[0] := "x";
+    n := s.ColumnBlob(1, back);
+    Out.String("  "); Out.Int(s.ColumnInt(0), 0); Out.String(" type=");
+    Out.Int(s.ColumnType(1), 0); Out.String(" IsNull=");
+    IF s.ColumnIsNull(1) THEN Out.String("TRUE") ELSE Out.String("FALSE") END;
+    Out.String(" length="); Out.Int(n, 0); ShowBlob(back, n);
+    IF n = 7 THEN
+      n := s.ColumnBlobByName("B", short);
+      Out.String(" into 2 bytes: length="); Out.Int(n, 0); ShowBlob(short, 2)
+    END;
+    Out.Ln
+  END;
+  Check("select BLOBs", conn.err = Db.noError);
+  s.Finalize;
+
+  Prepare("SELECT name, n FROM podb_conformance WHERE id = 1", s);
+  IF s.Step() THEN
+    n := s.ColumnBlob(0, back);
+    Out.String("text as a BLOB: length="); Out.Int(n, 0); ShowBlob(back, n); Out.Ln;
+    n := s.ColumnBlob(1, back);
+    Out.String("an integer as a BLOB: length="); Out.Int(n, 0); ShowBlob(back, n); Out.Ln
+  ELSE
+    Check("step", FALSE)
+  END;
+  s.Finalize;
+  Setup("DROP TABLE podb_blobs")
+END TestBlobs;
+
+
 (* ---- Many statements ---- *)
 
 PROCEDURE TestMany;
@@ -433,6 +557,8 @@ BEGIN
   TestErrors;
   TestReuse;
   TestReturning;
+  TestChanges;
+  TestBlobs;
   TestMany;
   Setup("DROP TABLE podb_conformance");
   conn.Close

@@ -37,8 +37,10 @@ zero 0: ok
 insert NULLs: ok
 types=0,0,0 text=[] int=0
 NULL as a real is 0: ok
+ColumnIsNull: ok
 reading NULL is no error: ok
 IS NULL: ok
+ColumnIsNull of a value: ok
 
 == Text
 empty [] type=3: ok
@@ -79,6 +81,30 @@ stepping past the end is no error: ok
 
 == RETURNING
 INSERT ... RETURNING: ok
+
+== Changes
+insert: 0 then 3, after Reset 0
+update 3: 0 then 3, after Reset 0
+update none: 0 then 0, after Reset 0
+select: 0 then 0, after Reset 0
+delete 2: 0 then 2, after Reset 0
+create: 0 then 0, after Reset 0
+drop: 0 then 0, after Reset 0
+a select changes nothing: ok
+UPDATE ... RETURNING counts once done: ok
+each run counts its own rows: ok
+
+== BLOBs
+insert a BLOB, an empty one and NULL: ok
+BindBlob of -1 bytes: FALSE err=3
+BindBlob of 9 bytes from 8: FALSE err=3
+BindBlob to parameter 3 of 2: FALSE err=3
+  1 type=4 IsNull=FALSE length=7 bytes=0,1,255,0,65,92,39 into 2 bytes: length=7 bytes=0,1
+  2 type=4 IsNull=FALSE length=0 bytes=
+  3 type=0 IsNull=TRUE length=0 bytes=
+select BLOBs: ok
+text as a BLOB: length=3 bytes=65,100,97
+an integer as a BLOB: length=2 bytes=51,55
 
 == Many statements
 1000 statements prepared and finalized: ok

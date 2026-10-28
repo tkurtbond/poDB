@@ -9,7 +9,7 @@ MODULE DbSqlite;
 
    The database file is created if it does not exist.  A statement is one SQL
    statement: Prepare rejects text that goes on after the first statement's
-   end, as PostgreSQL does.  A BLOB column reads as typeText. *)
+   end, as PostgreSQL does.  A BLOB value reads as typeBlob. *)
 
 IMPORT SYSTEM, Db, DbCStrings;
 
@@ -37,7 +37,9 @@ TYPE
   StatementDesc = RECORD (Db.StatementDesc)
     db: SYSTEM.ADDRESS;     (* the connection's handle, for sqlite3_errmsg *)
     stmt: SYSTEM.ADDRESS;   (* sqlite3_stmt *, or 0 once finalized *)
-    onRow: BOOLEAN          (* the last Step returned a row *)
+    onRow: BOOLEAN;         (* the last Step returned a row *)
+    before: HUGEINT;        (* sqlite3_total_changes64 when this run started *)
+    changes: HUGEINT        (* the rows this run changed, once it is done *)
   END;
 
   Driver = POINTER TO DriverDesc;
@@ -67,6 +69,14 @@ PROCEDURE ["C", "sqlite3_bind_double"] BindDouble (stmt: SYSTEM.ADDRESS;
 PROCEDURE ["C", "sqlite3_bind_text"] BindTextValue (stmt: SYSTEM.ADDRESS;
     i: SYSTEM.INT32; text: SYSTEM.ADDRESS; bytes: SYSTEM.INT32;
     destructor: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "sqlite3_bind_blob"] BindBlobValue (stmt: SYSTEM.ADDRESS;
+    i: SYSTEM.INT32; blob: SYSTEM.ADDRESS; bytes: SYSTEM.INT32;
+    destructor: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "sqlite3_bind_zeroblob"] BindZeroBlob (stmt: SYSTEM.ADDRESS;
+    i: SYSTEM.INT32; bytes: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "sqlite3_stmt_busy"] StatementBusy (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "sqlite3_changes64"] ChangesOf (db: SYSTEM.ADDRESS): SYSTEM.INT64;
+PROCEDURE ["C", "sqlite3_total_changes64"] TotalChanges (db: SYSTEM.ADDRESS): SYSTEM.INT64;
 PROCEDURE ["C", "sqlite3_step"] StepStatement (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_reset"] ResetStatement (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
 PROCEDURE ["C", "sqlite3_clear_bindings"] ClearBindings (stmt: SYSTEM.ADDRESS): SYSTEM.INT32;
@@ -82,6 +92,10 @@ PROCEDURE ["C", "sqlite3_column_double"] ColumnDouble (stmt: SYSTEM.ADDRESS;
     i: SYSTEM.INT32): LONGREAL;
 PROCEDURE ["C", "sqlite3_column_text"] ColumnTextOf (stmt: SYSTEM.ADDRESS;
     i: SYSTEM.INT32): SYSTEM.ADDRESS;
+PROCEDURE ["C", "sqlite3_column_blob"] ColumnBlobOf (stmt: SYSTEM.ADDRESS;
+    i: SYSTEM.INT32): SYSTEM.ADDRESS;
+PROCEDURE ["C", "sqlite3_column_bytes"] ColumnBytes (stmt: SYSTEM.ADDRESS;
+    i: SYSTEM.INT32): SYSTEM.INT32;
 
 
 (* ---- Helpers ---- *)
@@ -102,6 +116,15 @@ BEGIN
   wide := n;
   RETURN SHORT(wide)
 END ToInteger;
+
+PROCEDURE ToInt32 (n: LONGINT): SYSTEM.INT32;
+(* n, which fits, as an INT32.  SHORT(HUGEINT) is LONGINT under -O2 and
+   INTEGER under -OC, 32 bits under both. *)
+  VAR wide: HUGEINT;
+BEGIN
+  wide := n;
+  RETURN SHORT(wide)
+END ToInt32;
 
 PROCEDURE OnlySpace (VAR sql: ARRAY OF CHAR; i: SYSTEM.ADDRESS): BOOLEAN;
 (* TRUE if sql from i on holds nothing but blanks, semicolons and comments.
@@ -200,7 +223,7 @@ BEGIN
     Db.SetError(c, Db.errSql, "DbSqlite: the statement has placeholders that Db does not translate");
     RETURN FALSE
   END;
-  st.conn := c; st.db := c.db; st.onRow := FALSE;
+  st.conn := c; st.db := c.db; st.onRow := FALSE; st.before := 0; st.changes := 0;
   s := st;
   RETURN TRUE
 END Prepare;
@@ -255,6 +278,20 @@ BEGIN
 END BindText;
 
 
+PROCEDURE (s: Statement) BindBlob* (i: INTEGER; VAR v: ARRAY OF CHAR; n: LONGINT);
+(* Bind v[0] .. v[n-1] as a BLOB to parameter i (1-based).  SQLite copies
+   it. *)
+BEGIN
+  IF Live(s) THEN
+    IF (n < 0) OR (n > LEN(v)) OR (n > MAX(SYSTEM.INT32)) THEN
+      Db.SetError(s.conn, Db.errRange, "DbSqlite: BindBlob's length is outside the array")
+    ELSIF n = 0 THEN CheckBind(s, BindZeroBlob(s.stmt, i, 0))
+    ELSE CheckBind(s, BindBlobValue(s.stmt, i, SYSTEM.ADR(v[0]), ToInt32(n), transient))
+    END
+  END
+END BindBlob;
+
+
 (* ---- Statement: stepping ---- *)
 
 PROCEDURE (s: Statement) Step* (): BOOLEAN;
@@ -264,9 +301,16 @@ PROCEDURE (s: Statement) Step* (): BOOLEAN;
 BEGIN
   s.onRow := FALSE;
   IF Live(s) THEN
+    IF StatementBusy(s.stmt) = 0 THEN   (* a new run *)
+      s.before := TotalChanges(s.db); s.changes := 0
+    END;
     result := StepStatement(s.stmt);
     IF result = sqliteRow THEN s.onRow := TRUE
-    ELSIF result # sqliteDone THEN SetSqliteError(s.conn, Db.errSql, s.db)
+    ELSIF result = sqliteDone THEN
+      (* sqlite3_changes64 is the last INSERT, UPDATE or DELETE's count,
+         which may be another statement's if this one changed nothing *)
+      IF TotalChanges(s.db) # s.before THEN s.changes := ChangesOf(s.db) END
+    ELSE SetSqliteError(s.conn, Db.errSql, s.db)
     END
   END;
   RETURN s.onRow
@@ -277,7 +321,7 @@ PROCEDURE (s: Statement) Reset* ;
    stepped again. *)
   VAR result: SYSTEM.INT32;
 BEGIN
-  s.onRow := FALSE;
+  s.onRow := FALSE; s.changes := 0;
   IF Live(s) THEN
     result := ResetStatement(s.stmt);   (* repeats the last Step's error, already reported *)
     result := ClearBindings(s.stmt)
@@ -292,6 +336,14 @@ BEGIN
   s.onRow := FALSE;
   IF s.stmt # 0 THEN result := FinalizeStatement(s.stmt); s.stmt := 0 END
 END Finalize;
+
+
+PROCEDURE (s: Statement) Changes* (): HUGEINT;
+(* The rows the statement's last run inserted, updated or deleted, once Step
+   has returned FALSE. *)
+BEGIN
+  RETURN s.changes
+END Changes;
 
 
 (* ---- Statement: reading columns ---- *)
@@ -328,14 +380,15 @@ END ColumnName;
 
 PROCEDURE (s: Statement) ColumnType* (i: INTEGER): INTEGER;
 (* Type of column i's value in the current row: Db.typeNull, typeInt,
-   typeReal or typeText. *)
+   typeReal, typeText or typeBlob. *)
   VAR type: SYSTEM.INT32;
 BEGIN
   IF ~OnColumn(s, i) THEN RETURN Db.typeNull END;
   type := ColumnTypeOf(s.stmt, i);
   IF type = integerColumn THEN RETURN Db.typeInt
   ELSIF type = floatColumn THEN RETURN Db.typeReal
-  ELSIF (type = textColumn) OR (type = blobColumn) THEN RETURN Db.typeText
+  ELSIF type = textColumn THEN RETURN Db.typeText
+  ELSIF type = blobColumn THEN RETURN Db.typeBlob
   ELSE RETURN Db.typeNull
   END
 END ColumnType;
@@ -360,6 +413,20 @@ BEGIN
   out[0] := 0X;
   IF OnColumn(s, i) THEN DbCStrings.Copy(ColumnTextOf(s.stmt, i), out) END
 END ColumnText;
+
+PROCEDURE (s: Statement) ColumnBlob* (i: INTEGER; VAR out: ARRAY OF CHAR): LONGINT;
+(* Copy as many of column i's bytes as fit into out and return its whole
+   length; 0 for NULL.  A number gives the bytes of its text form. *)
+  VAR p: SYSTEM.ADDRESS; length, n: LONGINT;
+BEGIN
+  IF ~OnColumn(s, i) THEN RETURN 0 END;
+  p := ColumnBlobOf(s.stmt, i);   (* before sqlite3_column_bytes, which this may convert *)
+  length := ColumnBytes(s.stmt, i);
+  n := length;
+  IF n > LEN(out) THEN n := LEN(out) END;
+  IF (n > 0) & (p # 0) THEN SYSTEM.MOVE(p, SYSTEM.ADR(out[0]), n) END;
+  RETURN length
+END ColumnBlob;
 
 
 BEGIN

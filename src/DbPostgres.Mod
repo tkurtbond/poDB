@@ -10,9 +10,12 @@ MODULE DbPostgres;
    podb_2 ... (unique on its connection), and Finalize deallocates it
    (decision D5).  Parameters and results travel as text (decision D6): the
    numeric binders format the value, and ColumnInt and ColumnReal parse the
+   column's text.  The one exception is BindBlob, which sends its bytes in
+   binary format, for a bytea parameter; ColumnBlob unescapes a bytea
    column's text.  ColumnType gives typeInt for int2, int4 and int8,
-   typeReal for float4, float8 and numeric, and typeText for every other
-   type, bool included.  The server's notices are not printed. *)
+   typeReal for float4, float8 and numeric, typeBlob for bytea, and
+   typeText for every other type, bool included.  The server's notices are
+   not printed. *)
 
 IMPORT SYSTEM, Db, DbCStrings;
 
@@ -22,7 +25,10 @@ CONST
   emptyQuery = 0;
   commandOk = 1;
   tuplesOk = 2;
+  textFormat = 0;
+  binaryFormat = 1;
   (* pg_type.h *)
+  byteaOid = 17;
   int8Oid = 20;
   int2Oid = 21;
   int4Oid = 23;
@@ -37,6 +43,7 @@ TYPE
   Text = POINTER TO ARRAY OF CHAR;
   Values = POINTER TO ARRAY OF Text;
   Addresses = POINTER TO ARRAY OF SYSTEM.ADDRESS;
+  Int32s = POINTER TO ARRAY OF SYSTEM.INT32;
   StatementName = ARRAY maxStatementName OF CHAR;
 
   Connection = POINTER TO ConnectionDesc;
@@ -52,8 +59,11 @@ TYPE
     result: SYSTEM.ADDRESS;     (* PGresult * from PQexecPrepared, or 0 *)
     executed: BOOLEAN;          (* Step has run the statement since Prepare or Reset *)
     row, rows: SYSTEM.INT32;    (* the current row (-1 before the first) and the number of rows *)
+    changes: HUGEINT;           (* the rows the last run changed *)
     value: Values;              (* value[i] is parameter i+1 as text; NIL is NULL *)
-    address: Addresses          (* the addresses of value's texts, for libpq *)
+    address: Addresses;         (* the addresses of value's texts, for libpq *)
+    length: Int32s;             (* length[i] is value[i]'s length in bytes, if it is binary *)
+    format: Int32s              (* format[i] is textFormat or binaryFormat *)
   END;
 
   Driver = POINTER TO DriverDesc;
@@ -86,6 +96,11 @@ PROCEDURE ["C", "PQfname"] FieldName (result: SYSTEM.ADDRESS; i: SYSTEM.INT32): 
 PROCEDURE ["C", "PQftype"] FieldType (result: SYSTEM.ADDRESS; i: SYSTEM.INT32): SYSTEM.CARD32;
 PROCEDURE ["C", "PQgetvalue"] GetValue (result: SYSTEM.ADDRESS; row, i: SYSTEM.INT32): SYSTEM.ADDRESS;
 PROCEDURE ["C", "PQgetisnull"] GetIsNull (result: SYSTEM.ADDRESS; row, i: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "PQgetlength"] GetLength (result: SYSTEM.ADDRESS; row, i: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "PQcmdStatus"] CommandStatus (result: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQcmdTuples"] CommandRows (result: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQunescapeBytea"] UnescapeBytea (text, length: SYSTEM.ADDRESS): SYSTEM.ADDRESS;
+PROCEDURE ["C", "PQfreemem"] FreeMemory (p: SYSTEM.ADDRESS);
 
 (* DbPostgres.c *)
 PROCEDURE ["C", "podb_format_int"] FormatInt (v: SYSTEM.INT64; out, size: SYSTEM.ADDRESS);
@@ -126,6 +141,37 @@ BEGIN
   wide := n;
   RETURN SHORT(wide)
 END ToInteger;
+
+PROCEDURE ToInt32 (n: LONGINT): SYSTEM.INT32;
+(* n, which fits, as an INT32.  SHORT(HUGEINT) is LONGINT under -O2 and
+   INTEGER under -OC, 32 bits under both. *)
+  VAR wide: HUGEINT;
+BEGIN
+  wide := n;
+  RETURN SHORT(wide)
+END ToInt32;
+
+PROCEDURE StartsWith (VAR s: ARRAY OF CHAR; prefix: ARRAY OF CHAR): BOOLEAN;
+  VAR i: LONGINT;
+BEGIN
+  i := 0;
+  WHILE (prefix[i] # 0X) & (i < LEN(s)) & (s[i] = prefix[i]) DO INC(i) END;
+  RETURN prefix[i] = 0X
+END StartsWith;
+
+PROCEDURE ChangesOf (result: SYSTEM.ADDRESS): HUGEINT;
+(* The rows that result's command inserted, updated or deleted, from its
+   command tag ("INSERT 0 3", "UPDATE 2" ...); 0 for any other command. *)
+  VAR tag: ARRAY 16 OF CHAR; n: HUGEINT;
+BEGIN
+  DbCStrings.Copy(CommandStatus(result), tag);
+  n := 0;
+  IF StartsWith(tag, "INSERT ") OR StartsWith(tag, "UPDATE ") OR StartsWith(tag, "DELETE ")
+     OR StartsWith(tag, "MERGE ") THEN
+    IF ParseInt(CommandRows(result), SYSTEM.ADR(n)) = 0 THEN n := 0 END
+  END;
+  RETURN n
+END ChangesOf;
 
 PROCEDURE MakeName (n: LONGINT; VAR name: StatementName);
 (* name := "podb_" followed by n in decimal; n > 0 *)
@@ -210,8 +256,8 @@ BEGIN
   END;
   n := st.params.n;
   IF n = 0 THEN n := 1 END;   (* so that address[0] exists *)
-  NEW(st.value, n); NEW(st.address, n);
-  st.result := 0; st.executed := FALSE; st.row := -1; st.rows := 0;
+  NEW(st.value, n); NEW(st.address, n); NEW(st.length, n); NEW(st.format, n);
+  st.result := 0; st.executed := FALSE; st.row := -1; st.rows := 0; st.changes := 0;
   st.conn := c;
   s := st;
   RETURN TRUE
@@ -233,14 +279,15 @@ BEGIN
   RETURN TRUE
 END Live;
 
-PROCEDURE SetValue (s: Statement; i: INTEGER; v: Text);
-(* Make v, as text or NIL for NULL, the value of parameter i (1-based). *)
+PROCEDURE SetValue (s: Statement; i: INTEGER; v: Text; length: LONGINT; format: SYSTEM.INT32);
+(* Make v, NIL for NULL, the value of parameter i (1-based): text up to its
+   0X in textFormat, or length bytes in binaryFormat. *)
 BEGIN
   IF Live(s) THEN
     IF (i < 1) OR (i > s.params.n) THEN
       Db.SetError(s.conn, Db.errRange, "DbPostgres: no such parameter")
     ELSE
-      s.value[i - 1] := v
+      s.value[i - 1] := v; s.length[i - 1] := ToInt32(length); s.format[i - 1] := format
     END
   END
 END SetValue;
@@ -248,7 +295,7 @@ END SetValue;
 PROCEDURE (s: Statement) BindNull* (i: INTEGER);
 (* Bind NULL to parameter i (1-based). *)
 BEGIN
-  SetValue(s, i, NIL)
+  SetValue(s, i, NIL, 0, textFormat)
 END BindNull;
 
 PROCEDURE (s: Statement) BindInt* (i: INTEGER; v: HUGEINT);
@@ -256,7 +303,7 @@ PROCEDURE (s: Statement) BindInt* (i: INTEGER; v: HUGEINT);
   VAR t: Text;
 BEGIN
   NEW(t, numberSize); FormatInt(v, SYSTEM.ADR(t[0]), numberSize);
-  SetValue(s, i, t)
+  SetValue(s, i, t, 0, textFormat)
 END BindInt;
 
 PROCEDURE (s: Statement) BindReal* (i: INTEGER; v: LONGREAL);
@@ -265,7 +312,7 @@ PROCEDURE (s: Statement) BindReal* (i: INTEGER; v: LONGREAL);
   VAR t: Text;
 BEGIN
   NEW(t, numberSize); FormatReal(v, SYSTEM.ADR(t[0]), numberSize);
-  SetValue(s, i, t)
+  SetValue(s, i, t, 0, textFormat)
 END BindReal;
 
 PROCEDURE (s: Statement) BindText* (i: INTEGER; v: ARRAY OF CHAR);
@@ -278,8 +325,23 @@ BEGIN
   NEW(t, n + 1);
   FOR k := 0 TO n - 1 DO t[k] := v[k] END;
   t[n] := 0X;
-  SetValue(s, i, t)
+  SetValue(s, i, t, 0, textFormat)
 END BindText;
+
+
+PROCEDURE (s: Statement) BindBlob* (i: INTEGER; VAR v: ARRAY OF CHAR; n: LONGINT);
+(* Bind v[0] .. v[n-1] to parameter i (1-based), in binary format, which
+   suits a bytea parameter.  The statement keeps a copy. *)
+  VAR t: Text; k: LONGINT;
+BEGIN
+  IF (n < 0) OR (n > LEN(v)) OR (n > MAX(SYSTEM.INT32)) THEN
+    IF Live(s) THEN Db.SetError(s.conn, Db.errRange, "DbPostgres: BindBlob's length is outside the array") END
+  ELSE
+    IF n = 0 THEN NEW(t, 1) ELSE NEW(t, n) END;   (* so that t[0] exists *)
+    FOR k := 0 TO n - 1 DO t[k] := v[k] END;
+    SetValue(s, i, t, n, binaryFormat)
+  END
+END BindBlob;
 
 
 (* ---- Statement: stepping ---- *)
@@ -292,10 +354,12 @@ BEGIN
   FOR i := 0 TO s.params.n - 1 DO
     IF s.value[i] = NIL THEN s.address[i] := 0 ELSE s.address[i] := SYSTEM.ADR(s.value[i][0]) END
   END;
-  s.result := ExecutePrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]), 0, 0, 0);
+  s.result := ExecutePrepared(c.pg, SYSTEM.ADR(s.name), s.params.n, SYSTEM.ADR(s.address[0]),
+    SYSTEM.ADR(s.length[0]), SYSTEM.ADR(s.format[0]), textFormat);
   s.executed := TRUE; s.row := -1; s.rows := 0;
   status := ResultStatus(s.result);
-  IF status = tuplesOk THEN s.rows := RowCount(s.result)
+  IF status = tuplesOk THEN s.rows := RowCount(s.result); s.changes := ChangesOf(s.result)
+  ELSIF status = commandOk THEN s.changes := ChangesOf(s.result)
   ELSIF status = emptyQuery THEN Db.SetError(c, Db.errSql, "DbPostgres: no SQL statement")
   ELSIF status # commandOk THEN SetResultError(c, s.result)
   END
@@ -318,7 +382,7 @@ PROCEDURE (s: Statement) Reset* ;
 BEGIN
   IF Live(s) THEN
     Clear(s.result); s.result := 0;
-    s.executed := FALSE; s.row := -1; s.rows := 0
+    s.executed := FALSE; s.row := -1; s.rows := 0; s.changes := 0
   END
 END Reset;
 
@@ -331,10 +395,19 @@ BEGIN
     Clear(s.result); s.result := 0;
     Clear(s.description); s.description := 0;
     s.executed := FALSE; s.row := -1; s.rows := 0;
-    s.value := NIL; s.address := NIL;
+    s.value := NIL; s.address := NIL; s.length := NIL; s.format := NIL;
     Deallocate(s.conn(Connection), s.name)
   END
 END Finalize;
+
+
+PROCEDURE (s: Statement) Changes* (): HUGEINT;
+(* The rows the statement's last run inserted, updated or deleted, once Step
+   has returned FALSE. *)
+BEGIN
+  IF (s.description = 0) OR ~s.executed OR (s.row < s.rows) THEN RETURN 0 END;
+  RETURN s.changes
+END Changes;
 
 
 (* ---- Statement: reading columns ---- *)
@@ -378,13 +451,14 @@ END ColumnName;
 
 PROCEDURE (s: Statement) ColumnType* (i: INTEGER): INTEGER;
 (* Type of column i's value in the current row: Db.typeNull, typeInt,
-   typeReal or typeText. *)
+   typeReal, typeText or typeBlob. *)
   VAR type: SYSTEM.CARD32;
 BEGIN
   IF ~OnColumn(s, i) OR IsNull(s, i) THEN RETURN Db.typeNull END;
   type := FieldType(s.result, i);
   IF (type = int2Oid) OR (type = int4Oid) OR (type = int8Oid) THEN RETURN Db.typeInt
   ELSIF (type = float4Oid) OR (type = float8Oid) OR (type = numericOid) THEN RETURN Db.typeReal
+  ELSIF type = byteaOid THEN RETURN Db.typeBlob
   ELSE RETURN Db.typeText
   END
 END ColumnType;
@@ -423,6 +497,28 @@ BEGIN
   out[0] := 0X;
   IF OnColumn(s, i) THEN DbCStrings.Copy(GetValue(s.result, s.row, i), out) END
 END ColumnText;
+
+PROCEDURE (s: Statement) ColumnBlob* (i: INTEGER; VAR out: ARRAY OF CHAR): LONGINT;
+(* Copy as many of column i's bytes as fit into out and return its whole
+   length; 0 for NULL.  A bytea value is unescaped from its text form; any
+   other value gives the bytes of its text. *)
+  VAR p, bytes: SYSTEM.ADDRESS; wide: HUGEINT; length, n: LONGINT;
+BEGIN
+  IF ~OnColumn(s, i) OR IsNull(s, i) THEN RETURN 0 END;
+  IF FieldType(s.result, i) = byteaOid THEN
+    p := UnescapeBytea(GetValue(s.result, s.row, i), SYSTEM.ADR(bytes));
+    IF p = 0 THEN Db.SetError(s.conn, Db.errDriver, "DbPostgres: out of memory"); RETURN 0 END;
+    wide := bytes; length := SHORT(wide)   (* a bytea holds at most 1 GB *)
+  ELSE
+    p := GetValue(s.result, s.row, i);
+    length := GetLength(s.result, s.row, i)
+  END;
+  n := length;
+  IF n > LEN(out) THEN n := LEN(out) END;
+  IF n > 0 THEN SYSTEM.MOVE(p, SYSTEM.ADR(out[0]), n) END;
+  IF FieldType(s.result, i) = byteaOid THEN FreeMemory(p) END;
+  RETURN length
+END ColumnBlob;
 
 
 BEGIN

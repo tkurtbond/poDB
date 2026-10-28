@@ -371,6 +371,29 @@ on the way:
   section 6 records the decisions, the build commands and where `src/Db.Mod`
   differs from `doc/Db.Mod`.
 
+## After Phase 6: additions to the interface
+
+The user approved these on 2026-10-27:
+
+1. `ColumnIsNull` and `ColumnIsNullByName`, written once in `Db` on
+   `ColumnType`.
+2. `Changes(): HUGEINT`, the rows a prepared statement's last run inserted,
+   updated or deleted. SQLite uses `sqlite3_changes64`, but only if
+   `sqlite3_total_changes64` moved during the run, since otherwise the count
+   is some other statement's. PostgreSQL uses `PQcmdTuples` when the command
+   tag is `INSERT`, `UPDATE`, `DELETE` or `MERGE`.
+3. `typeBlob`, `BindBlob`, `ColumnBlob` and their `ByName` forms. A
+   PostgreSQL BLOB parameter goes in binary format, the one exception to
+   D6. `BYTEA` is the portable column type.
+4. Dollar-quoted strings in `Translate`.
+
+**Done.** Learned on the way:
+
+- SQLite refuses to bind to a statement that has been stepped and not
+  reset (`SQLITE_MISUSE`).
+- `ColumnBlob` returns the whole length, so a caller can find it with a
+  small buffer and read again with a big enough one.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
@@ -385,9 +408,6 @@ on the way:
 - The BSDs: build and test on cymoril, artos and alerik. The library paths
   are `-link -L/usr/local/lib` on FreeBSD and OpenBSD and `/usr/pkg/lib` on
   NetBSD, and the `GNUmakefile` must work with `gmake`.
-- Interface additions to discuss with the user: `ColumnIsNull`, the number of
-  rows a statement changed, `BindBlob` and `ColumnBlob`, and dollar-quoted
-  strings in `Translate`.
 - PostgreSQL single-row mode (`PQsetSingleRowMode`), to stream large
   results.
 - An ODBC driver (unixODBC), as the design's section 3 mentions.

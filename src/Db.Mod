@@ -40,7 +40,10 @@ MODULE Db;
        s.conn := c.
      - Step returns TRUE when a row is available, FALSE when the statement is
        done OR failed; callers check c.err after the loop.
-     - ColumnText copies into the caller's buffer and truncates if too small.
+     - ColumnText copies into the caller's buffer and truncates if too small;
+       ColumnBlob does too, and returns the value's whole length.
+     - Changes is the number of rows the statement's last run inserted,
+       updated or deleted, once Step has returned FALSE; Reset sets it to 0.
 *)
 
 CONST
@@ -54,6 +57,7 @@ CONST
   typeInt* = 1;
   typeReal* = 2;
   typeText* = 3;
+  typeBlob* = 4;
 
   maxParams = 64;
   maxName = 32;
@@ -139,17 +143,58 @@ BEGIN
   WHILE k > 0 DO DEC(k); Put(out, o, digits[k], ok) END
 END PutIndex;
 
+PROCEDURE DollarTag (VAR sql: ARRAY OF CHAR; i: LONGINT; VAR tag: ARRAY OF CHAR;
+                     VAR ok: BOOLEAN): BOOLEAN;
+(* TRUE if the opening delimiter of a dollar-quoted string, $$ or $name$,
+   starts at sql[i], and then tag is the delimiter.  A name too long for tag
+   sets ok to FALSE. *)
+  VAR k: LONGINT; tooLong: BOOLEAN;
+BEGIN
+  tag[0] := "$"; k := 1; INC(i); tooLong := FALSE;
+  IF (i < LEN(sql)) & IsNameStart(sql[i]) THEN
+    WHILE (i < LEN(sql)) & IsNameChar(sql[i]) DO
+      IF k < LEN(tag) - 2 THEN tag[k] := sql[i]; INC(k) ELSE tooLong := TRUE END;
+      INC(i)
+    END
+  END;
+  IF (i < LEN(sql)) & (sql[i] = "$") THEN
+    tag[k] := "$"; tag[k + 1] := 0X;
+    IF tooLong THEN ok := FALSE END;
+    RETURN TRUE
+  END;
+  RETURN FALSE
+END DollarTag;
+
+PROCEDURE At (VAR sql: ARRAY OF CHAR; i: LONGINT; VAR tag: ARRAY OF CHAR): BOOLEAN;
+(* TRUE if sql[i] starts with tag *)
+  VAR k: LONGINT;
+BEGIN
+  k := 0;
+  WHILE (tag[k] # 0X) & (i + k < LEN(sql)) & (sql[i + k] = tag[k]) DO INC(k) END;
+  RETURN tag[k] = 0X
+END At;
+
+PROCEDURE PutTag (VAR out: ARRAY OF CHAR; VAR o, i: LONGINT; VAR tag: ARRAY OF CHAR;
+                  VAR ok: BOOLEAN);
+(* copy tag to out, and move i past it in the SQL *)
+  VAR k: LONGINT;
+BEGIN
+  k := 0;
+  WHILE tag[k] # 0X DO Put(out, o, tag[k], ok); INC(k); INC(i) END
+END PutTag;
+
 PROCEDURE Translate* (sql: ARRAY OF CHAR; prefix: CHAR; VAR out: ARRAY OF CHAR;
                       VAR p: Params): BOOLEAN;
 (* Rewrite the placeholders in sql into prefix+number (?1, ?2 ... or $1, $2 ...)
    and fill p.  Returns FALSE if the output buffer is too small, there are more
    than 64 parameters or a name is longer than 31 characters, or ? and :name
-   are mixed.  Text inside '...' and "..." and inside comments is copied
-   unchanged, and :: (a PostgreSQL cast) is not taken for a parameter.
-   Not handled: PostgreSQL dollar-quoted strings; PostgreSQL operators that
-   contain a question mark. *)
+   are mixed, or a dollar quote's tag is longer than 31 characters.  Text
+   inside '...', "...", PostgreSQL's dollar-quoted strings ($$...$$,
+   $tag$...$tag$) and comments is copied unchanged, and :: (a PostgreSQL
+   cast) is not taken for a parameter.  Not handled: PostgreSQL operators
+   that contain a question mark. *)
   VAR i, o: LONGINT; k, idx: INTEGER; c, q: CHAR; name: ARRAY maxName OF CHAR;
-      ok, named, positional: BOOLEAN;
+      tag: ARRAY maxName + 2 OF CHAR; ok, named, positional: BOOLEAN;
 BEGIN
   p.n := 0; p.named := FALSE;
   i := 0; o := 0; ok := TRUE; named := FALSE; positional := FALSE;
@@ -177,6 +222,15 @@ BEGIN
       IF (i + 1 < LEN(sql)) & (sql[i] = "*") THEN
         Put(out, o, "*", ok); Put(out, o, "/", ok); INC(i, 2)
       END
+    ELSIF (c = "$") & ((i = 0) OR ~IsNameChar(sql[i - 1]) & (sql[i - 1] # "$"))
+          & DollarTag(sql, i, tag, ok) THEN
+      (* dollar-quoted string: copy through the closing tag; $1 and the $ in
+         a name such as a$b are not openings *)
+      PutTag(out, o, i, tag, ok);
+      WHILE ok & (i < LEN(sql)) & (sql[i] # 0X) & ~At(sql, i, tag) DO
+        Put(out, o, sql[i], ok); INC(i)
+      END;
+      IF At(sql, i, tag) THEN PutTag(out, o, i, tag, ok) END
     ELSIF (c = ":") & (i + 1 < LEN(sql)) & IsNameStart(sql[i + 1])
           & ((i = 0) OR (sql[i - 1] # ":")) THEN
       (* named parameter *)
@@ -286,6 +340,11 @@ END BindReal;
 PROCEDURE (s: Statement) BindText* (i: INTEGER; v: ARRAY OF CHAR);
 END BindText;
 
+PROCEDURE (s: Statement) BindBlob* (i: INTEGER; VAR v: ARRAY OF CHAR; n: LONGINT);
+(* Bind the n bytes v[0] .. v[n-1], which may include 0X, as a BLOB (SQLite)
+   or bytea (PostgreSQL).  n < 0 or n > LEN(v) sets errRange. *)
+END BindBlob;
+
 
 (* ---- Statement: binding by name, written once here ----
    An unknown name sets conn.err to errRange; check conn.err as usual. *)
@@ -324,6 +383,13 @@ BEGIN
   IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindText(i, v) END
 END BindTextByName;
 
+PROCEDURE (s: Statement) BindBlobByName* (name: ARRAY OF CHAR; VAR v: ARRAY OF CHAR; n: LONGINT);
+  VAR i: INTEGER;
+BEGIN
+  i := IndexOf(s.params, name);
+  IF i = 0 THEN SetError(s.conn, errRange, "no such parameter name") ELSE s.BindBlob(i, v, n) END
+END BindBlobByName;
+
 
 (* ---- Statement: stepping and results, implemented by drivers ---- *)
 
@@ -338,6 +404,14 @@ END Reset;
 
 PROCEDURE (s: Statement) Finalize* ;
 END Finalize;
+
+PROCEDURE (s: Statement) Changes* (): HUGEINT;
+(* The number of rows the statement's last run inserted, updated or deleted,
+   once Step has returned FALSE.  0 before then, after Reset, and for a
+   statement that changes no rows. *)
+BEGIN
+  RETURN 0
+END Changes;
 
 PROCEDURE (s: Statement) ColumnCount* (): INTEGER;
 BEGIN
@@ -369,6 +443,21 @@ PROCEDURE (s: Statement) ColumnText* (i: INTEGER; VAR out: ARRAY OF CHAR);
 BEGIN
   out[0] := 0X
 END ColumnText;
+
+PROCEDURE (s: Statement) ColumnBlob* (i: INTEGER; VAR out: ARRAY OF CHAR): LONGINT;
+(* Copy as many of the value's bytes as fit into out, with no 0X added, and
+   return the value's whole length in bytes: if that is more than LEN(out),
+   the value was truncated.  NULL has length 0.  A value that is not a BLOB
+   gives the bytes of its text form. *)
+BEGIN
+  RETURN 0
+END ColumnBlob;
+
+PROCEDURE (s: Statement) ColumnIsNull* (i: INTEGER): BOOLEAN;
+(* TRUE if column i of the current row is NULL. *)
+BEGIN
+  RETURN s.ColumnType(i) = typeNull
+END ColumnIsNull;
 
 
 (* ---- Statement: reading columns by name, written once here ----
@@ -437,6 +526,23 @@ BEGIN
   ELSE s.ColumnText(i, out)
   END
 END ColumnTextByName;
+
+PROCEDURE (s: Statement) ColumnBlobByName* (name: ARRAY OF CHAR; VAR out: ARRAY OF CHAR): LONGINT;
+  VAR i: INTEGER;
+BEGIN
+  i := s.ColumnIndex(name);
+  IF i < 0 THEN SetError(s.conn, errRange, "no such column name"); RETURN 0 END;
+  RETURN s.ColumnBlob(i, out)
+END ColumnBlobByName;
+
+PROCEDURE (s: Statement) ColumnIsNullByName* (name: ARRAY OF CHAR): BOOLEAN;
+(* An unknown name counts as NULL, besides setting errRange. *)
+  VAR i: INTEGER;
+BEGIN
+  i := s.ColumnIndex(name);
+  IF i < 0 THEN SetError(s.conn, errRange, "no such column name"); RETURN TRUE END;
+  RETURN s.ColumnIsNull(i)
+END ColumnIsNullByName;
 
 
 (* ---- Opening ---- *)

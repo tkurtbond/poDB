@@ -16,6 +16,14 @@ mixed: FALSE
 65 parameters: FALSE
 31-character name: ok [SELECT ?1] n=1 named=TRUE names=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 32-character name: FALSE
+dollar quotes: ok [SELECT $$ ? :x 'it -- $$, $1] n=1 named=FALSE
+tagged dollar quotes: ok [SELECT $f$ $$ ? $g$ $f$ || $1] n=1 named=TRUE names=a
+dollar quotes with no space: ok [SELECT 1, $$?$$, $1] n=1 named=TRUE names=a
+not dollar quotes: ok [SELECT a$b$, $1, c$$ FROM t WHERE x = $1] n=1 named=TRUE names=x
+dollar quote unterminated: ok [SELECT $q$ ? $$ :a] n=0 named=FALSE
+31-character dollar tag: ok [SELECT $aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$ ? $aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$ $1] n=1 named=FALSE
+32 characters after $, no closing $: ok [SELECT $aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa] n=0 named=FALSE
+32-character dollar tag: FALSE
 output fits exactly: ok [SELECT ?1] n=1 named=FALSE
 output one too small: FALSE
 35008 characters: ok, ends [ $1] n=1 named=FALSE
@@ -52,6 +60,9 @@ mock: bind real 1 = 1500/1000
   err=0
 mock: bind null 2
   err=0
+mock: bind blob 1 = 1 0 255
+  err=0
+  err=3 msg=no such parameter name
   err=3 msg=no such parameter name
   err=3 msg=no such parameter name
 mock: finalize
@@ -74,12 +85,18 @@ mock: step
   missing text=[]  err=3 msg=no such column name
   missing type=0  err=3 msg=no such column name
   name in 3 characters=[Ad]
+  IsNull name=FALSE id=FALSE BlobByName name=3
+  missing IsNull=TRUE  err=3 msg=no such column name
+  missing blob=0  err=3 msg=no such column name
 mock: step
   id=2 name=[] type=0 last=0
   missing int=0  err=3 msg=no such column name
   missing text=[]  err=3 msg=no such column name
   missing type=0  err=3 msg=no such column name
   name in 3 characters=[]
+  IsNull name=TRUE id=FALSE BlobByName name=0
+  missing IsNull=TRUE  err=3 msg=no such column name
+  missing blob=0  err=3 msg=no such column name
 mock: step
   err=0
 mock: finalize
@@ -108,4 +125,7 @@ mock: prepare CREATE TABLE t (a INTEGER)
 mock: step
 mock: finalize
 Exec CREATE: TRUE  err=0
+mock: prepare DELETE
+Changes=3
+mock: finalize
 mock: close

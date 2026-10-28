@@ -16,7 +16,8 @@ The design, and the reasons for it, are in
 ## Requirements
 
 - poc 0.9.0 or later (the Fedora package `peaseblossom`).
-- For `DbSqlite`: SQLite 3 and its development files (`sqlite-devel`).
+- For `DbSqlite`: SQLite 3.37 or later and its development files
+  (`sqlite-devel`). The driver uses `sqlite3_changes64`, which 3.37 added.
 - For `DbPostgres`: libpq 17 or later and its development files
   (`libpq-devel`). The driver uses `PQclosePrepared`, which libpq 17 added.
 - For `make check-postgres`: `postgresql-server`, for `initdb` and `pg_ctl`.
@@ -128,7 +129,14 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
 - `Finalize` every statement and `Close` every connection. The collector
   frees the Oberon records, but not the database's handles.
 - `ColumnText` truncates a value to fit the buffer, and always ends it with
-  `0X`.
+  `0X`. `ColumnBlob` truncates too, adds no `0X`, and returns the value's
+  whole length.
+- `Changes` gives the number of rows a prepared statement's last run
+  inserted, updated or deleted, once `Step` has returned FALSE. `Exec` gives
+  no count.
+- For binary data, declare the column `BYTEA`, bind with `BindBlob` and read
+  with `ColumnBlob`. SQLite accepts the type name and stores the bytes
+  unchanged.
 
 ## The SQLite driver
 
@@ -143,14 +151,15 @@ poDB cannot hide: auto-increment keys, typing, dialect features.
 The file is created if it does not exist.
 
 **Types.** A value reads as SQLite stored it: `INTEGER` as `typeInt`, `REAL`
-as `typeReal`, `TEXT` as `typeText`, NULL as `typeNull`. `ColumnInt`,
+as `typeReal`, `TEXT` as `typeText`, a BLOB as `typeBlob`, NULL as
+`typeNull`. `ColumnInt`,
 `ColumnReal` and `ColumnText` convert any value as SQLite does, without an
 error: `ColumnInt` of the text `'abc'` is 0, and of `2.7` is 2.
 
 **Limits.**
 
-- A BLOB reads as `typeText` and `ColumnText` gives its bytes up to the
-  first `0X`. There is no `BindBlob` yet.
+- `ColumnText` of a BLOB gives its bytes up to the first `0X`. Use
+  `ColumnBlob`.
 - `Prepare` takes one SQL statement. Text after the first statement's end is
   an error, as on PostgreSQL.
 
@@ -178,6 +187,7 @@ type the server declares for it:
 |---|---|
 | `smallint`, `integer`, `bigint` | `typeInt` |
 | `real`, `double precision`, `numeric` | `typeReal` |
+| `bytea` | `typeBlob` |
 | NULL, any type | `typeNull` |
 | anything else | `typeText` |
 
@@ -188,7 +198,10 @@ with `conn.err` set to `errRange`.
 **Limits.**
 
 - A `boolean` reads as the text `t` or `f`, where SQLite stores 1 or 0.
-- A `bytea` reads as text, in PostgreSQL's hex form (`\x...`).
+- `ColumnText` of a `bytea` gives PostgreSQL's hex form (`\x...`). Use
+  `ColumnBlob`.
+- `BindBlob` sends its bytes in binary format, so its parameter should be a
+  `bytea`.
 - A `numeric` reads as `typeReal`, so `ColumnReal` loses digits beyond a
   `LONGREAL`'s. Read it with `ColumnText` to keep them all.
 - libpq loads a query's whole result into memory at the first `Step`.
@@ -197,7 +210,7 @@ with `conn.err` set to `errRange`.
   transaction.
 - The server's notices, such as `DROP TABLE IF EXISTS`'s "skipping", are
   discarded.
-- Dollar-quoted strings (`$$ ... $$`) and operators containing `?` (some of
-  JSONB's) confuse the placeholder translation. Avoid them in SQL given to
-  `Db`.
+- Operators containing `?` (some of JSONB's, such as `?|`) confuse the
+  placeholder translation. Avoid them in SQL given to `Db`, or use the
+  equivalent functions (`jsonb_exists_any`).
 
