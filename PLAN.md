@@ -181,6 +181,22 @@ The user decided all of them on 2026-10-27.
 **Done when** `DbDemo` prints the expected rows under both models, built
 against the `db` and `db-sqlite` libraries (D3) and also from source.
 
+**Done.** Learned on the way:
+- `sqlite3_prepare_v2`'s tail pointer gives where the first statement ends.
+  The offset from the start of the buffer is an `ADDRESS`, which does not
+  fit a `LONGINT` under `-O2`, so `OnlySpace` takes an `ADDRESS` index.
+- A C `int` result becomes an `INTEGER` through `LONGINT`: an `INT32` is
+  assignable to `LONGINT` under both models, and `SHORT(LONGINT)` is
+  `INTEGER` under both (`DbSqlite.ToInteger`).
+- `Translate` can lengthen SQL: `:a` may become `?10`, and each `?` up to
+  `?64`. `Prepare` allocates `LEN(sql) * 3/2 + 130` characters for its
+  output.
+- Column readers check that a row is current and the column exists, since
+  SQLite leaves both undefined.
+- `DbDemo` takes an optional URL argument, defaulting to `sqlite:demo.db`.
+  `make check` runs it in memory, twice against one file, and built from
+  source. Its expected output is `test/DbDemo.expected`.
+
 ## Phase 3: The shared tests, run against SQLite
 
 `test/Conformance.Mod` is one program that takes its URL from the command

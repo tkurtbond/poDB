@@ -1,15 +1,18 @@
 MODULE DbDemo;
 (* Uses only the Db interface.  To move from SQLite to PostgreSQL, change the
-   URL below (and import DbPostgres instead of / as well as DbSqlite).
-   Assumes an Oakwood-style Out module; adjust to poc's runtime modules. *)
+   URL below (and import DbPostgres instead of / as well as DbSqlite).  A URL
+   given on the command line replaces the default:
 
-IMPORT Db, Out, DbSqlite;   (* DbSqlite is imported so its driver registers itself *)
+     DbDemo sqlite::memory: *)
+
+IMPORT Db, Out, Args, DbSqlite;   (* DbSqlite is imported so its driver registers itself *)
 
 CONST
-  url = "sqlite:///demo.db";
-  (* url = "postgres://demo:secret@localhost:5432/demo"; *)
+  defaultUrl = "sqlite:demo.db";
+  (* defaultUrl = "postgres://demo:secret@localhost:5432/demo"; *)
 
 VAR
+  url: ARRAY 256 OF CHAR;
   conn: Db.Connection;
   st: Db.Statement;
   name: ARRAY 64 OF CHAR;
@@ -20,7 +23,7 @@ BEGIN
   HALT(1)
 END Fail;
 
-PROCEDURE AddPerson (id: LONGINT; name: ARRAY OF CHAR; age: LONGINT);
+PROCEDURE AddPerson (id: HUGEINT; name: ARRAY OF CHAR; age: HUGEINT);
 (* named parameters *)
   VAR s: Db.Statement; row: BOOLEAN;
 BEGIN
@@ -37,6 +40,7 @@ BEGIN
 END AddPerson;
 
 BEGIN
+  IF Args.argc > 1 THEN Args.Get(1, url) ELSE url := defaultUrl END;
   IF ~Db.Open(url, conn) THEN
     Out.String(Db.lastError); Out.Ln; HALT(1)
   END;
@@ -44,6 +48,8 @@ BEGIN
   IF ~conn.Exec("CREATE TABLE IF NOT EXISTS person (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)") THEN
     Fail("create table")
   END;
+  (* so that a second run against the same file starts from the same rows *)
+  IF ~conn.Exec("DELETE FROM person") THEN Fail("delete") END;
 
   IF ~conn.Begin() THEN Fail("begin") END;
   AddPerson(1, "Ada", 36);
@@ -58,7 +64,7 @@ BEGIN
   WHILE st.Step() DO
     (* by name; by number this would be st.ColumnInt(0) and st.ColumnText(1, name) *)
     st.ColumnTextByName("name", name);
-    Out.Int(SHORT(st.ColumnIntByName("id")), 0); Out.String("  "); Out.String(name); Out.Ln
+    Out.Int(st.ColumnIntByName("id"), 0); Out.String("  "); Out.String(name); Out.Ln
   END;
   IF conn.err # Db.noError THEN Fail("select") END;
   st.Finalize;

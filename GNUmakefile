@@ -21,11 +21,13 @@ TOP := $(abspath .)
 
 LIBDIR := $(BUILD)/lib
 DB_SOURCES := src/Db.Mod src/DbCStrings.Mod
+SQLITE_SOURCES := src/DbSqlite.Mod
+LIBRARIES := db db-sqlite
 
 .PHONY: all check check-postgres check-all clean \
         $(addprefix check-,$(MODELS))
 
-all: $(foreach m,$(MODELS),$(LIBDIR)/db-$(m).stamp)
+all: $(foreach m,$(MODELS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(m).stamp))
 
 check: $(addprefix check-,$(MODELS))
 
@@ -39,10 +41,15 @@ clean:
 
 # $(call build-library,<model>,<name>,<sources>,<extra poc arguments>)
 define build-library
-mkdir -p $(LIBDIR) && cd $(LIBDIR) && $(POC) -$(1) $(POCFLAGS) $(4) \
+mkdir -p $(LIBDIR) && cd $(LIBDIR) && $(POC) -$(1) $(POCFLAGS) -library-path . $(4) \
   -library $(2) $(addprefix $(TOP)/,$(3))
 touch $@
 endef
+
+# db-%.stamp also matches db-sqlite-O2.stamp, but GNU make takes the rule
+# with the shorter stem, db-sqlite-%.stamp.
+$(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp
+	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),-link -lsqlite3)
 
 $(LIBDIR)/db-%.stamp: $(DB_SOURCES)
 	$(call build-library,$*,db,$(DB_SOURCES))
@@ -58,7 +65,7 @@ cd $(dir $(2)) && $(POC) -$(1) $(POCFLAGS) -library-path $(TOP)/$(LIBDIR) \
 endef
 
 # check-<model> runs every test that needs no server under <model>.
-$(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp
+$(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp $(LIBDIR)/db-sqlite-%.stamp
 	@echo "== smoke test (-$*)"
 	$(call build-program,$*,test/SmokeSqlite.Mod,-link -lsqlite3)
 	$(BUILD)/$*/test/SmokeSqlite > $(BUILD)/$*/test/SmokeSqlite.out
@@ -67,3 +74,16 @@ $(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp
 	$(call build-program,$*,test/TestDb.Mod)
 	$(BUILD)/$*/test/TestDb > $(BUILD)/$*/test/TestDb.out
 	diff -u test/TestDb.expected $(BUILD)/$*/test/TestDb.out
+	@echo "== DbDemo against the libraries (-$*)"
+	$(call build-program,$*,examples/DbDemo.Mod)
+	$(BUILD)/$*/test/DbDemo sqlite::memory: > $(BUILD)/$*/test/DbDemo.out
+	diff -u test/DbDemo.expected $(BUILD)/$*/test/DbDemo.out
+	rm -f $(BUILD)/$*/test/demo.db
+	$(BUILD)/$*/test/DbDemo sqlite:$(BUILD)/$*/test/demo.db > $(BUILD)/$*/test/DbDemo.out
+	$(BUILD)/$*/test/DbDemo sqlite:$(BUILD)/$*/test/demo.db >> $(BUILD)/$*/test/DbDemo.out
+	cat test/DbDemo.expected test/DbDemo.expected | diff -u - $(BUILD)/$*/test/DbDemo.out
+	@echo "== DbDemo from source (-$*)"
+	cd examples && $(POC) -$* $(POCFLAGS) -import-path $(TOP)/src \
+	  -output-dir $(TOP)/$(BUILD)/$*/source -o $(TOP)/$(BUILD)/$*/source/DbDemo \
+	  -link -lsqlite3 DbDemo.Mod
+	$(BUILD)/$*/source/DbDemo sqlite::memory: | diff -u test/DbDemo.expected -
