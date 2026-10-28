@@ -287,6 +287,7 @@ These were decided while planning the implementation (on 2026-10-27):
 ### 6.4 Not done
 
 - Finalizers that close a connection or statement the program forgot. They would tie the drivers to poc's `GarbageCollectedHeap` and are left for later.
+- Scanning a large PostgreSQL result with a server-side cursor, so that statements can run inside the loop and stopping early costs nothing. `PLAN.md` proposes a design (`conn.PrepareQuery`).
 - An ODBC driver, and the BSDs.
 
 ## Sources

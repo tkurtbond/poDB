@@ -442,6 +442,91 @@ The user approved these on 2026-10-28:
   drops trailing zeros (`14:30:05.5`), and rejects a time zone offset, so
   a `timestamptz` is an error instead of a silently shifted time.
 
+## Proposed, for review: scanning a large result with a cursor
+
+Not implemented. The problem: the PostgreSQL driver streams a result in
+chunks only while nothing else runs on the connection. A statement run
+inside the loop makes the driver read the rest of the outer result into
+memory, and `Reset` or `Finalize` partway reads the rest and discards it.
+SQLite has neither problem, since `sqlite3_step` computes each row as it is
+asked for and statements interleave freely.
+
+A server-side cursor fixes both. The PostgreSQL pattern is:
+
+```sql
+BEGIN;
+DECLARE podb_cursor_1 NO SCROLL CURSOR FOR SELECT ... $1 ...;
+FETCH 100 FROM podb_cursor_1;   -- repeated until it gives fewer than 100 rows
+CLOSE podb_cursor_1;
+COMMIT;
+```
+
+Each `FETCH` is a complete command whose result is at most 100 rows, so
+between `FETCH`es the connection is free for other statements, and
+stopping early is one `CLOSE`, with nothing to read.
+
+A program could write this SQL itself, but SQLite has no `DECLARE` or
+`FETCH`, so the program would no longer run on both. The proposal is
+instead one new procedure in `Db`:
+
+```oberon
+PROCEDURE (c: Connection) PrepareQuery* (sql: ARRAY OF CHAR; VAR s: Statement): BOOLEAN;
+(* Prepare a query whose rows are read a few at a time on the server, so
+   that other statements can run while it is stepped, and Reset or
+   Finalize partway costs nothing.  sql must be a SELECT or VALUES.  Step
+   it only inside a transaction (Begin ... Commit or Rollback); the
+   transaction's end ends the scan. *)
+```
+
+- The statement it returns is an ordinary `Statement`: the same binding,
+  `Step`, column readers and `Finalize`. Only how the rows arrive differs.
+- **In `Db`** it is not abstract: the default calls `c.Prepare`. That is
+  all SQLite needs, so `DbSqlite` and `MockDriver` do not change, and a
+  program can use `PrepareQuery` on both databases.
+- **In `DbPostgres`** it overrides the default:
+  - `Prepare` translates the SQL, then prepares two statements: the query
+    itself, only to describe it (`PQdescribePrepared` of a `DECLARE` has
+    no columns, so `ColumnCount` and `ColumnName` before the first `Step`
+    need the plain query), and `DECLARE podb_cursor_<n> NO SCROLL CURSOR
+    FOR <query>` with the same `$n` parameters. A probe on libpq 18 and
+    PostgreSQL 18 confirmed that a prepared `DECLARE` takes parameters.
+    Preparing the plain query also reports bad SQL at `Prepare`, as for
+    any statement. The second could instead be prepared lazily.
+  - The first `Step` runs the `DECLARE` with the bound parameters, then
+    `FETCH 100`. Later `Step`s move through the rows, and the one after
+    the last row `FETCH`es again, unless the last `FETCH` gave fewer than
+    100 rows. Each `FETCH` is read whole, without chunked mode, so it
+    never leaves the connection busy; before it runs, `Drain` still
+    finishes any other statement's chunked result, as now.
+  - `Reset` and `Finalize` send `CLOSE podb_cursor_<n>` if the cursor is
+    open, ignoring a failure (in a failed transaction, or after its end,
+    the cursor is already gone). `Finalize` also deallocates both
+    prepared statements.
+  - `Changes` is 0, since a cursor's query changes nothing.
+- **Errors.** Outside a transaction, the server refuses the `DECLARE`
+  ("DECLARE CURSOR can only be used in transaction blocks"), and `Step`
+  returns FALSE with `errSql`. After `Commit` or `Rollback` the next
+  `FETCH` fails with "cursor does not exist", also `errSql`. A `WITH HOLD`
+  cursor would survive the commit, but the server computes its whole
+  result at the commit, which is what this is meant to avoid.
+- **Cost.** One round trip per 100 rows, where a chunked result streams
+  without waiting. So `Prepare` stays the default, and `PrepareQuery` is
+  for results too big to hold, or loops that run other statements.
+
+Questions for the user:
+
+1. The name: `PrepareQuery`, `PrepareCursor` or `PrepareScan`?
+2. A fixed 100 rows a `FETCH`, or a size given to `PrepareQuery`?
+3. Should `Prepare` alone describe the query, as above, or should
+   `ColumnCount` and `ColumnName` work only after the first `Step`, saving
+   one statement on the server?
+
+Tests, if approved: `Conformance` would run the existing 250-row loops
+through `PrepareQuery` with a statement inside the loop, and `Finalize`
+partway. `TestPostgres` would check the errors outside a transaction and
+after `Commit`, and use `pg_cursors` to check that `Reset` and `Finalize`
+close the cursor.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
