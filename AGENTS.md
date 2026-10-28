@@ -150,9 +150,12 @@ reasons.
   `initdb` under `build/pgdata`. It listens only on a Unix socket in
   `build/pgsock` (no TCP), with `trust` authentication. It is never the
   system's PostgreSQL service, and nothing here needs root.
-- It needs the packages `postgresql-server` (for `initdb`, `pg_ctl`) and
-  `libpq-devel` (for the `libpq.so` link name). Installing packages is the
-  user's job. Ask; do not run `dnf` yourself.
+- It uses the packages `postgresql-server` (for `initdb`, `pg_ctl`) and
+  `libpq-devel` (for the `libpq.so` link name). Both are installed on atla.
+  Installing packages is the user's job. Ask; do not run `dnf` yourself.
+- A Unix socket's path is limited to 107 bytes. The socket cannot go under
+  the session's scratch directory, whose path is too long. `build/pgsock` in
+  this checkout is fine.
 - Never write a real password, host or user name into the repository, a test
   or a commit. The test URL comes from `PODB_PG_URL`, which defaults to the
   local socket.

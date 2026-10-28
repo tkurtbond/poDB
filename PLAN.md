@@ -16,11 +16,17 @@ work follows.
 |---|---|
 | poc | 0.9.0, `/usr/bin/poc`, runtime in `/usr/lib/poc`, clang 22.1.8 |
 | SQLite | `sqlite-devel` 3.51.2 installed: `sqlite3.h` and `libsqlite3.so` are there |
-| libpq | Only the runtime `libpq.so.5` (18). **`libpq-devel` is not installed**, so there is no `libpq.so` for `-lpq` |
-| PostgreSQL server | **Not installed** (`postgresql` 18.6 client only) |
+| libpq | `libpq-devel` 18.0 installed: `libpq-fe.h` and `libpq.so` are there |
+| PostgreSQL server | `postgresql-server` 18.6 installed (`initdb`, `pg_ctl`) |
 
-Before Phase 4 the user must run `sudo dnf install libpq-devel
-postgresql-server`. Until then, Phases 0-3 go ahead without PostgreSQL.
+A throwaway cluster made as Phase 4 describes, under the repository's
+`build/`, started without root, created `podb_test`, and answered `psql` at
+`postgres:///podb_test?host=<abs>/build/pgsock&user=podb`.
+
+The server would not start with its socket under the session's scratch
+directory. A Unix socket's path is limited to 107 bytes, and that path,
+ending in `.s.PGSQL.5432`, was 114. Under `/home/tkb/Repos/Oberon/poDB/build/pgsock`
+it is 54.
 
 ### What compiling the design with poc showed
 
@@ -193,12 +199,13 @@ drivers. It uses only the common SQL subset (design section 4). It covers:
 
 ## Phase 4: `DbPostgres`
 
-Needs the packages listed in the Context section.
-
 1. **The test cluster.** `test/pg-start.sh` runs `initdb -A trust -U podb`
    into `build/pgdata` (once), then `pg_ctl start` with `-c
    listen_addresses='' -k <abs>/build/pgsock`, and creates the database
-   `podb_test`. `test/pg-stop.sh` stops the cluster. The default
+   `podb_test`. If `<abs>/build/pgsock/.s.PGSQL.5432` is longer than 107
+   bytes (a deep checkout), the script puts the socket in a short directory
+   made with `mktemp -d /tmp/podb-XXXXXX` instead, and writes that path to
+   `build/pgsock-dir` for the tests and for `pg-stop.sh`. `test/pg-stop.sh` stops the cluster. The default
    `PODB_PG_URL` is `postgres:///podb_test?host=<abs>/build/pgsock&user=podb`.
    libpq takes such a URI as it is, so the driver passes the whole URL to
    `PQconnectdb`.
