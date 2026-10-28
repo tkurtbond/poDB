@@ -45,7 +45,9 @@ reasons.
 - **D4:** parameters are numbered from 1 and columns from 0, as in the
   design.
 - **D5:** each PostgreSQL prepared statement gets a unique name per
-  connection, and `Finalize` runs `DEALLOCATE` on it.
+  connection, and `Finalize` deallocates it. It does so with
+  `PQclosePrepared` (libpq 17 or later), not the SQL `DEALLOCATE`, which the
+  server refuses in a failed transaction.
 - **D6:** PostgreSQL parameters and results use text format. The driver
   formats numbers as text to bind them and parses text to read them.
 - **D7:** `doc/Db.Mod` and `doc/DbDemo.Mod` stay unchanged as part of the
@@ -154,6 +156,9 @@ reasons.
   `initdb` under `build/pgdata`. It listens only on a Unix socket in
   `build/pgsock` (no TCP), with `trust` authentication. It is never the
   system's PostgreSQL service, and nothing here needs root.
+- `test/pg-start.sh` makes the cluster (once) and starts it,
+  `test/pg-stop.sh` stops it, and `test/pg-url.sh` prints the test URL.
+  `make check-postgres` uses all three.
 - It uses the packages `postgresql-server` (for `initdb`, `pg_ctl`) and
   `libpq-devel` (for the `libpq.so` link name). Both are installed on atla.
   Installing packages is the user's job. Ask; do not run `dnf` yourself.

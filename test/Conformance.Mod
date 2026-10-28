@@ -3,13 +3,16 @@ MODULE Conformance;
    each driver's URL:
 
      Conformance sqlite::memory:
+     Conformance 'postgres:///podb_test?host=/path/to/socket&user=podb'
+
+   It imports both drivers, so the URL alone picks the driver.
 
    It uses only SQL that SQLite and PostgreSQL both accept (design, section
    4), works in a table of its own, podb_conformance, and prints one line per
    case, which make compares with Conformance.expected.  Error messages
    differ between databases, so it prints error codes, never messages. *)
 
-IMPORT Db, Out, Args, DbSqlite;
+IMPORT Db, Out, Args, DbSqlite, DbPostgres;
 
 CONST
   table = "podb_conformance";

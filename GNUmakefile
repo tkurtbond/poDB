@@ -22,10 +22,11 @@ TOP := $(abspath .)
 LIBDIR := $(BUILD)/lib
 DB_SOURCES := src/Db.Mod src/DbCStrings.Mod
 SQLITE_SOURCES := src/DbSqlite.Mod
-LIBRARIES := db db-sqlite
+POSTGRES_SOURCES := src/DbPostgres.Mod src/DbPostgres.c
+LIBRARIES := db db-sqlite db-postgres
 
 .PHONY: all check check-postgres check-all clean \
-        $(addprefix check-,$(MODELS))
+        $(addprefix check-,$(MODELS)) $(addprefix check-postgres-,$(MODELS))
 
 all: $(foreach m,$(MODELS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(m).stamp))
 
@@ -33,8 +34,17 @@ check: $(addprefix check-,$(MODELS))
 
 check-all: check check-postgres
 
-check-postgres:
-	@echo "check-postgres: no PostgreSQL tests yet"
+# check-postgres runs against $$PODB_PG_URL if it is set.  Otherwise it starts
+# the test cluster in build/pgdata, runs the tests and stops the cluster,
+# whether or not they pass.
+check-postgres: all
+	@if [ -n "$$PODB_PG_URL" ]; then \
+	  $(MAKE) --no-print-directory $(addprefix check-postgres-,$(MODELS)); \
+	else \
+	  test/pg-start.sh || exit 1; \
+	  $(MAKE) --no-print-directory $(addprefix check-postgres-,$(MODELS)); status=$$?; \
+	  test/pg-stop.sh; exit $$status; \
+	fi
 
 clean:
 	rm -rf $(BUILD)
@@ -51,6 +61,11 @@ endef
 $(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp
 	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),-link -lsqlite3)
 
+# poc finds DbPostgres.c beside DbPostgres.Mod and compiles it as the
+# module's C part, so only the module is named.
+$(LIBDIR)/db-postgres-%.stamp: $(POSTGRES_SOURCES) $(LIBDIR)/db-%.stamp
+	$(call build-library,$*,db-postgres,src/DbPostgres.Mod,-link -lpq)
+
 $(LIBDIR)/db-%.stamp: $(DB_SOURCES)
 	$(call build-library,$*,db,$(DB_SOURCES))
 
@@ -65,7 +80,7 @@ cd $(dir $(2)) && $(POC) -$(1) $(POCFLAGS) -library-path $(TOP)/$(LIBDIR) \
 endef
 
 # check-<model> runs every test that needs no server under <model>.
-$(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp $(LIBDIR)/db-sqlite-%.stamp
+$(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.stamp,$(LIBRARIES)))
 	@echo "== smoke test (-$*)"
 	$(call build-program,$*,test/SmokeSqlite.Mod,-link -lsqlite3)
 	$(BUILD)/$*/test/SmokeSqlite > $(BUILD)/$*/test/SmokeSqlite.out
@@ -85,9 +100,22 @@ $(addprefix check-,$(MODELS)): check-%: $(LIBDIR)/db-%.stamp $(LIBDIR)/db-sqlite
 	@echo "== DbDemo from source (-$*)"
 	cd examples && $(POC) -$* $(POCFLAGS) -import-path $(TOP)/src \
 	  -output-dir $(TOP)/$(BUILD)/$*/source -o $(TOP)/$(BUILD)/$*/source/DbDemo \
-	  -link -lsqlite3 DbDemo.Mod
+	  -link -lsqlite3 -link -lpq DbDemo.Mod
 	$(BUILD)/$*/source/DbDemo sqlite::memory: | diff -u test/DbDemo.expected -
 	@echo "== conformance, SQLite (-$*)"
 	$(call build-program,$*,test/Conformance.Mod)
 	$(BUILD)/$*/test/Conformance sqlite::memory: > $(BUILD)/$*/test/Conformance-sqlite.out
 	diff -u test/Conformance.expected $(BUILD)/$*/test/Conformance-sqlite.out
+
+# check-postgres-<model> runs the PostgreSQL tests under <model>, against
+# the URL that test/pg-url.sh prints.
+$(addprefix check-postgres-,$(MODELS)): check-postgres-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.stamp,$(LIBRARIES)))
+	@echo "== DbDemo, PostgreSQL (-$*)"
+	$(call build-program,$*,examples/DbDemo.Mod)
+	$(BUILD)/$*/test/DbDemo "$$(test/pg-url.sh)" > $(BUILD)/$*/test/DbDemo-postgres.out
+	$(BUILD)/$*/test/DbDemo "$$(test/pg-url.sh)" >> $(BUILD)/$*/test/DbDemo-postgres.out
+	cat test/DbDemo.expected test/DbDemo.expected | diff -u - $(BUILD)/$*/test/DbDemo-postgres.out
+	@echo "== conformance, PostgreSQL (-$*)"
+	$(call build-program,$*,test/Conformance.Mod)
+	$(BUILD)/$*/test/Conformance "$$(test/pg-url.sh)" > $(BUILD)/$*/test/Conformance-postgres.out
+	diff -u test/Conformance.expected $(BUILD)/$*/test/Conformance-postgres.out

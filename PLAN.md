@@ -73,7 +73,7 @@ The user decided all of them on 2026-10-27.
 | D2 | SQLite URL form | **Decided:** `sqlite:<path>`, where the path runs to the end of the URL: `sqlite:demo.db` is relative, and `sqlite:///abs/file.db` gives `/abs/file.db` (the `//` with an empty host is dropped). `sqlite::memory:` and `sqlite:///:memory:` both mean an in-memory database. |
 | D3 | How the libraries are split | **Decided:** three poc libraries: **`db`** (`Db`, `DbCStrings`), **`db-sqlite`** (built with `-link -lsqlite3`) and **`db-postgres`** (built with `-link -lpq`). A program that uses only SQLite then never needs libpq. |
 | D4 | Parameter and column index bases | **Decided:** keep the design's choice: parameters 1-based, columns 0-based (design section 2.7). |
-| D5 | PostgreSQL prepared-statement names | **Decided:** each statement gets a unique name per connection (`podb_1`, `podb_2`, ...), and `Finalize` runs `DEALLOCATE`. A single unnamed statement would be replaced by the next `Prepare`. |
+| D5 | PostgreSQL prepared-statement names | **Decided:** each statement gets a unique name per connection (`podb_1`, `podb_2`, ...), and `Finalize` deallocates it (with `PQclosePrepared`; see Phase 4). A single unnamed statement would be replaced by the next `Prepare`. |
 | D6 | PostgreSQL parameter and result format | **Decided: text** for both. `BindInt` and `BindReal` format the value as text, and `ColumnInt` and `ColumnReal` parse it. The server infers each parameter's type, and every column type can be read, at least as text. Binary would need exact types for every parameter and a decoder for every result type. libpq sets the format per parameter, so a later `BindBlob` can use binary for its parameters alone. |
 | D7 | Where the source files live | **Decided:** `doc/Db.Mod` and `doc/DbDemo.Mod` stay in `doc/`, unchanged, as part of the design. The working versions, which are built and tested, are copies of them: `src/Db.Mod` and `examples/DbDemo.Mod`. |
 
@@ -276,7 +276,7 @@ error", and SQL holding two statements, which both drivers reject.
    `bool`, to `typeText`. `ColumnInt` and `ColumnReal` parse the text. A
    value that does not parse returns 0 and sets `errRange`.
 9. **`Reset`** clears the result and keeps the bindings. **`Finalize`**
-   clears the result and runs `DEALLOCATE` (with `PQexec`). **`Close`**
+   clears the result and deallocates the statement (`PQclosePrepared`). **`Close`**
    calls `PQfinish`.
 10. The module body registers the driver under both `postgres` and
     `postgresql`.
@@ -285,6 +285,29 @@ error", and SQL holding two statements, which both drivers reject.
 under both models, with the same `Conformance.expected` file as SQLite. If a
 case has to differ, the difference goes in the design's section 4 and the
 test prints the same line for both databases.
+
+**Done.** Learned on the way:
+
+- No case had to differ: `Conformance` passed against PostgreSQL 18 with
+  SQLite's expected file, under both models.
+- `DEALLOCATE` fails in a transaction that has already failed, so the
+  prepared statement stayed on the server until the connection closed.
+  `Finalize` uses `PQclosePrepared` (libpq 17 or later) instead: it is a
+  protocol message, and works there. A probe counting
+  `pg_prepared_statements` showed no statement left after a failed
+  transaction.
+- `Conformance` reads `ColumnCount` and `ColumnName` before the first
+  `Step`, which a `PGresult` from `PQexecPrepared` cannot answer. `Prepare`
+  therefore also calls `PQdescribePrepared` and keeps its result. It gives
+  the parameter count, too, so `Prepare` rejects `$n` placeholders that
+  `Db.Translate` did not write, as `DbSqlite` does.
+- libpq prints the server's notices (`DROP TABLE IF EXISTS`'s "skipping")
+  on standard error. Setting a notice processor takes a C callback, so
+  `DbPostgres.c` installs one that ignores them.
+- `ColumnInt` of text that is not a number is 0 with `errRange`, where
+  SQLite gives 0 silently. The design's section 4 records this.
+- `Conformance` and `DbDemo` import both drivers, so step 1 of Phase 5 (the
+  URL alone picks the driver) is already covered by `make check-postgres`.
 
 ## Phase 5: Running both drivers together
 

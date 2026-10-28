@@ -1,11 +1,13 @@
 MODULE DbDemo;
 (* Uses only the Db interface.  To move from SQLite to PostgreSQL, change the
-   URL below (and import DbPostgres instead of / as well as DbSqlite).  A URL
-   given on the command line replaces the default:
+   URL below.  A program that uses only one database imports only its
+   driver; this one imports both.  A URL given on the command line replaces
+   the default:
 
-     DbDemo sqlite::memory: *)
+     DbDemo sqlite::memory:
+     DbDemo postgres://user@host/dbname *)
 
-IMPORT Db, Out, Args, DbSqlite;   (* DbSqlite is imported so its driver registers itself *)
+IMPORT Db, Out, Args, DbSqlite, DbPostgres;   (* imported so that their drivers register themselves *)
 
 CONST
   defaultUrl = "sqlite:demo.db";

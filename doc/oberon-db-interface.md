@@ -165,12 +165,12 @@ Like binding by name, these are written once in `Db`, on top of two driver metho
 | `Db` operation | libpq API |
 |---|---|
 | `Open` | `PQconnectdb` / `PQstatus` |
-| `Prepare` | `Db.Translate(sql, "$", …)`, then `PQprepare` with `nParams` = `s.params.n` |
-| `Bind*` | Collect parameters as text (or binary) in the driver |
+| `Prepare` | `Db.Translate(sql, "$", …)`, then `PQprepare` with `nParams` = `s.params.n`, under a name unique on the connection (`podb_1`, `podb_2`, …), then `PQdescribePrepared` |
+| `Bind*` | Collect parameters as text in the driver; numbers are formatted to text |
 | `Step` | First call runs `PQexecPrepared`; later calls advance a row cursor over the `PGresult` |
-| `ColumnCount` / `ColumnName` | `PQnfields` / `PQfname` |
-| `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype` |
-| `Finalize` | `PQclear` |
+| `ColumnCount` / `ColumnName` | `PQnfields` / `PQfname` on the description, so they work before the first `Step` |
+| `Column*` | `PQgetvalue`, `PQgetisnull`, `PQftype`; numbers are parsed from text |
+| `Finalize` | `PQclear`, then `PQclosePrepared` (libpq 17 or later), which deallocates the statement even in a failed transaction, where `DEALLOCATE` is refused |
 | `Close` | `PQfinish` |
 | Error messages | `PQerrorMessage` |
 
@@ -183,7 +183,8 @@ ODBC (for example unixODBC) is an alternative single driver that could cover bot
 - **Auto-increment keys.** `INTEGER PRIMARY KEY` auto-increments in SQLite but not in PostgreSQL. The demo supplies ids explicitly. `INSERT ... RETURNING id` works on both (SQLite 3.35 or later).
 - **Typing.** SQLite is loosely typed, while PostgreSQL enforces column types and is stricter about booleans, dates and quoting. Keep to plain `INTEGER`, `TEXT` and `REAL` columns while developing on SQLite, and test against PostgreSQL early.
 - **Placeholder syntax.** `Db.Translate` hides the `?` / `:name` / `$n` differences, but it is a simple scanner, not a full SQL parser (see section 2.6 for what it skips and what it does not handle).
-- **Integer width.** The interface uses `LONGINT` for integer values. Check its width in poc, since both databases support 64-bit integers.
+- **Integer width.** The interface uses `HUGEINT` for integer values, which is 64 bits in poc under both size models, as are both databases' largest integers.
+- **Reading a value as the wrong type.** SQLite converts any value to the type asked for: `ColumnInt` of the text `'abc'` is 0, with no error. The PostgreSQL driver parses the value's text, so `ColumnInt` of text that is not a number is 0 with `errRange`. Both truncate a real number toward zero for `ColumnInt`. A PostgreSQL `boolean` reads as the text `t` or `f`, where SQLite stores 1 or 0.
 - **Dialect features.** Date and time functions, upsert syntax (`ON CONFLICT`), and concurrency and locking behaviour differ. Stay within the common SQL subset, or isolate dialect-specific statements in one module.
 - **Concurrency.** SQLite allows one writer at a time. PostgreSQL's multi-user behaviour may expose problems that never appear in single-user SQLite testing.
 - **Result streaming.** As noted above, libpq loads the whole result by default, which matters for very large queries.
