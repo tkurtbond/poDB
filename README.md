@@ -250,3 +250,7 @@ with `conn.err` set to `errRange`.
   placeholder translation. Avoid them in SQL given to `Db`, or use the
   equivalent functions (`jsonb_exists_any`).
 
+## License
+
+poDB is under the BSD 3-Clause License, as Peaseblossom is. See
+[`LICENSE`](LICENSE).
