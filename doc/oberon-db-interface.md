@@ -2,7 +2,7 @@
 
 **Goal:** write application code once against a single interface, start development on SQLite, and move to PostgreSQL later by changing little more than the connection URL.
 
-**Status:** design plus two Oberon-2 source files (`Db.Mod`, `DbDemo.Mod`). Nothing has been compiled, because poc was not available when these were written. The `DbSqlite` and `DbPostgres` driver modules are not yet written; they need poc's C-calling syntax (see [Next steps](#next-steps)).
+**Status:** implemented. `Db`, `DbSqlite` and `DbPostgres` are built with poc 0.9.0 under both of its size models and tested against SQLite and PostgreSQL. The working code is in `src/`, `examples/` and `test/`, and the repository's `README.md` says how to build and use it. `Db.Mod` and `DbDemo.Mod` in this directory are kept as they were first written, before poc was available. [Section 6](#6-state-of-the-implementation) says where the working copies differ from them, and records the decisions made while implementing the design.
 
 ---
 
@@ -29,9 +29,12 @@ The design has three layers.
 ### 2.1 Connection URLs
 
 ```
+sqlite:relative/file.db
 sqlite:///path/to/file.db
+sqlite::memory:
 sqlite:///:memory:
 postgres://user:pw@host:5432/dbname
+postgresql:///dbname?host=/path/to/socket/dir
 ```
 
 `Db.Open(url, conn)` reads the scheme before the first `:`, finds the registered driver, and hands the full URL to that driver's `Open`.
@@ -196,12 +199,65 @@ ODBC (for example unixODBC) is an alternative single driver that could cover bot
 | `Db.Mod` | Abstract interface, driver registry, `Open`, placeholder translation, binding by name, columns by name |
 | `DbDemo.Mod` | Example program using only `Db`, with named and positional parameters and columns read by name (assumes an Oakwood-style `Out` module; adjust to poc's runtime modules) |
 
-## 6. Next steps
+Both are the original design and are not built. The implementation is elsewhere in the repository:
 
-1. Read the "call C" section of poc's `doc/users-guide.md` (and the Reference Guide) to learn the foreign-function syntax: declaring external procedures, linking `-lsqlite3` / `-lpq`, passing strings and pointers.
-2. Write `DbSqlite.Mod` first, since it needs no server, and run `DbDemo` against it.
-3. Write `DbPostgres.Mod`, including `?` → `$n` rewriting and the row cursor.
-4. Add a test suite that runs the same statements against both drivers, to catch dialect differences early.
+| File | Contents |
+|---|---|
+| `src/Db.Mod` | `Db`, started as a copy of `doc/Db.Mod` |
+| `src/DbCStrings.Mod` | Copies a C string into an Oberon buffer, for the drivers |
+| `src/DbSqlite.Mod` | The SQLite driver |
+| `src/DbPostgres.Mod`, `src/DbPostgres.c` | The PostgreSQL driver, and its C part (`snprintf`, `strtoll`, the notice processor) |
+| `examples/DbDemo.Mod` | `DbDemo`, started as a copy of `doc/DbDemo.Mod` |
+| `test/` | `Db`'s unit tests (on a mock driver), the conformance test both drivers pass, and the PostgreSQL test cluster's scripts |
+
+## 6. State of the implementation
+
+The three steps that were planned here are done: `DbSqlite` was written first and runs `DbDemo`, `DbPostgres` followed, and one conformance test runs the same statements against both drivers and expects the same output from each.
+
+### 6.1 Building and linking
+
+poDB is built as three poc libraries, `db` (`Db`, `DbCStrings`), `db-sqlite` (`DbSqlite`) and `db-postgres` (`DbPostgres`). The driver libraries are built with `-link -lsqlite3` and `-link -lpq`, which poc records, so a program that uses them is linked with the C library without naming it:
+
+```
+poc -library db src/Db.Mod src/DbCStrings.Mod
+poc -library-path . -link -lsqlite3 -library db-sqlite src/DbSqlite.Mod
+poc -library-path . -link -lpq -library db-postgres src/DbPostgres.Mod
+poc -library-path <dir> DbDemo.Mod
+```
+
+poc compiles `DbPostgres.c` as `DbPostgres`'s C part because it lies beside `DbPostgres.Mod`. A program built from the sources rather than the libraries names the C libraries itself: `poc -import-path src -link -lsqlite3 -link -lpq DbDemo.Mod`. The repository's `GNUmakefile` builds each library under `-O2` and `-OC`, with and without `-g`, and `make install` installs them.
+
+### 6.2 Decisions
+
+These were decided while planning the implementation (on 2026-10-27):
+
+| | Decision |
+|---|---|
+| D1 | 64-bit integer values are `HUGEINT` in the public interface: `BindInt`, `BindIntByName`, `ColumnInt`, `ColumnIntByName`. `LONGINT` is only 32 bits under poc's default size model. |
+| D2 | SQLite URLs are `sqlite:<path>`: `sqlite:demo.db` is relative, `sqlite:///abs/file.db` is absolute, and `sqlite::memory:` or `sqlite:///:memory:` is an in-memory database. |
+| D3 | There are three poc libraries, `db`, `db-sqlite` and `db-postgres`, so a program that uses one database does not link the other's C library. |
+| D4 | Parameters are numbered from 1 and columns from 0, as in section 2.7. |
+| D5 | Each PostgreSQL prepared statement gets a name unique on its connection, and `Finalize` deallocates it with `PQclosePrepared` (libpq 17 or later). |
+| D6 | PostgreSQL parameters and results use text format. |
+| D7 | `doc/Db.Mod` and `doc/DbDemo.Mod` stay unchanged as part of the design. |
+
+### 6.3 Where `src/Db.Mod` differs from `doc/Db.Mod`
+
+- **`HUGEINT`** for integer values (D1), in the four procedures listed above.
+- **`Finalize` and `Close` leave `c.err` as it is.** As first written, `Exec` lost an error from `Step` when it finalized the statement. Section 2.4 now states the rule.
+- **Forward declarations.** poc requires a procedure, type-bound ones included, to be declared before it is called, so `Db.Mod` declares `Step` and `Finalize` with `PROCEDURE ^` before `Exec` uses them.
+- **`LONGINT` indexes into character arrays.** Under poc's default size model `INTEGER` stops at 32767, and SQL text or a value can be longer. `Translate` and the name lookups index with `LONGINT`.
+- **Column names up to 127 characters** (`maxColumnName`), not 63. PostgreSQL's limit is 63 bytes, but SQLite has none, and an expression gives a long name.
+- **`Db.Open`** checks the scheme's length before copying it, rejects a URL with no scheme, sets `lastError` to `""` on success, and sets it to a message if a driver returns NIL without one.
+
+`examples/DbDemo.Mod` differs from `doc/DbDemo.Mod` only in its use of `HUGEINT`, in taking an optional URL from the command line, in importing both drivers, and in deleting the table's rows first so that it can run twice on one file.
+
+### 6.4 Not done
+
+- Finalizers that close a connection or statement the program forgot. They would tie the drivers to poc's `GarbageCollectedHeap` and are left for later.
+- `ColumnIsNull`, the number of rows a statement changed, `BindBlob` and `ColumnBlob`, and dollar-quoted strings in `Translate`: interface additions, still to be discussed.
+- Streaming large PostgreSQL results (`PQsetSingleRowMode`).
+- An ODBC driver, and the BSDs.
 
 ## Sources
 

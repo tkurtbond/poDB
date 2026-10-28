@@ -1,6 +1,8 @@
 # GNUmakefile for poDB, built with the installed poc.
 #
-#   make                 build the poDB libraries under each size model
+#   make                 build the poDB libraries under each size model, with
+#                        and without debug information (-g)
+#   make install         install them in $(POCLIBDIR), ~/.local/lib/poc by default
 #   make check           the tests that need no server, under each size model
 #   make check-postgres  the tests that need the PostgreSQL test cluster
 #   make check-all       check and check-postgres
@@ -9,14 +11,18 @@
 #
 # Modules compiled under -O2 cannot be mixed with modules compiled under -OC,
 # so each size model builds separately: the libraries in
-# build/lib/<triple>/<model>/ (where poc puts them), the test programs in
-# build/<model>/test/.  Test programs take Db and the drivers from the
-# libraries, never from src/, so the checks test what is installed.
+# build/lib/<triple>/<variant>/ (where poc puts them; a variant is O2, OC,
+# O2-g or OC-g), the test programs in build/<model>/test/.  Test programs
+# take Db and the drivers from the libraries, never from src/, so the
+# checks test what is installed.  A library records the poc version that
+# built it, so after upgrading poc, run make clean and make install again.
 
 POC ?= poc
 MODELS ?= O2 OC
 BUILD := build
 POCFLAGS ?= -trap-location
+PREFIX ?= $(HOME)/.local
+POCLIBDIR ?= $(PREFIX)/lib/poc
 
 TOP := $(abspath .)
 
@@ -25,11 +31,29 @@ DB_SOURCES := src/Db.Mod src/DbCStrings.Mod
 SQLITE_SOURCES := src/DbSqlite.Mod
 POSTGRES_SOURCES := src/DbPostgres.Mod src/DbPostgres.c
 LIBRARIES := db db-sqlite db-postgres
+VARIANTS := $(MODELS) $(addsuffix -g,$(MODELS))
 
-.PHONY: all check check-postgres check-all check-valgrind clean \
+# $(call variant-flags,<variant>) gives poc's flags for a variant: O2-g gives
+# -O2 -g.
+variant-flags = -$(firstword $(subst -, ,$(1))) $(if $(filter %-g,$(1)),-g)
+
+.PHONY: all install check check-postgres check-all check-valgrind clean \
         $(addprefix check-,$(MODELS)) $(addprefix check-postgres-,$(MODELS))
 
-all: $(foreach m,$(MODELS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(m).stamp))
+all: $(foreach v,$(VARIANTS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(v).stamp))
+
+# install copies each library, in each variant, into $(POCLIBDIR).  A
+# program then finds them with -library-path $(POCLIBDIR); installed in
+# poc's own directory (POCLIBDIR=/usr/lib/poc, as root) it finds them with
+# none.
+define newline
+
+
+endef
+
+install: all
+	$(foreach v,$(VARIANTS),$(foreach l,$(LIBRARIES),$(POC) $(call variant-flags,$(v)) \
+	  -library-path $(LIBDIR) -install-library $(l) -output-dir $(POCLIBDIR)$(newline)))
 
 check: $(addprefix check-,$(MODELS))
 
@@ -70,15 +94,15 @@ check-valgrind: check-O2
 clean:
 	rm -rf $(BUILD)
 
-# $(call build-library,<model>,<name>,<sources>,<extra poc arguments>)
+# $(call build-library,<variant>,<name>,<sources>,<extra poc arguments>)
 define build-library
-mkdir -p $(LIBDIR) && cd $(LIBDIR) && $(POC) -$(1) $(POCFLAGS) -library-path . $(4) \
+mkdir -p $(LIBDIR) && cd $(LIBDIR) && $(POC) $(call variant-flags,$(1)) $(POCFLAGS) -library-path . $(4) \
   -library $(2) $(addprefix $(TOP)/,$(3))
 touch $@
 endef
 
-# db-%.stamp also matches db-sqlite-O2.stamp, but GNU make takes the rule
-# with the shorter stem, db-sqlite-%.stamp.
+# The stem is the variant.  db-%.stamp also matches db-sqlite-O2.stamp, but
+# GNU make takes the rule with the shorter stem, db-sqlite-%.stamp.
 $(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp
 	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),-link -lsqlite3)
 

@@ -359,6 +359,17 @@ way:
    fixes from Phase 1), say so in the design document. Do not edit the
    original.
 
+**Done.** Learned on the way:
+
+- `poc -library` with `-g` builds only the `-g` variant (`O2-g`, `OC-g`),
+  so the `GNUmakefile` builds each library four times. `make install` runs
+  `poc -install-library` once per library and variant, into `POCLIBDIR`
+  (`~/.local/lib/poc` by default). A program built with `-library-path`
+  pointing there links with `-lsqlite3` and `-lpq` without naming them.
+- The driver user's guides are in `README.md`. The design document's new
+  section 6 records the decisions, the build commands and where `src/Db.Mod`
+  differs from `doc/Db.Mod`.
+
 ## Later, not scheduled
 
 - The BSDs: build and test on cymoril, artos and alerik. The library paths

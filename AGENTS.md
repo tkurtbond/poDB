@@ -139,7 +139,10 @@ reasons.
 
 ## Building and checking
 
-- `make`: build the poDB libraries under both size models in `build/`.
+- `make`: build the poDB libraries under both size models, with and without
+  `-g`, in `build/`.
+- `make install`: install them in `$(POCLIBDIR)`, `~/.local/lib/poc` by
+  default.
 - `make check`: run every test that needs no server (the `Db` unit tests and
   the SQLite driver) under `-O2` and `-OC`.
 - `make check-postgres`: start the test cluster (if it is not running), run
