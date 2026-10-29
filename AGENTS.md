@@ -143,6 +143,8 @@ reasons.
   `-g`, in `build/`.
 - `make install`: install them in `$(POCLIBDIR)`, `~/.local/lib/poc` by
   default.
+- `make uninstall`: remove from `$(POCLIBDIR)` the files `make install` put
+  there, and any directory left empty.
 - `make check`: run every test that needs no server (the `Db` unit tests and
   the SQLite driver) under `-O2` and `-OC`.
 - `make check-postgres`: start the test cluster (if it is not running), run

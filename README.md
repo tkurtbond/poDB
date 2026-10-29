@@ -31,6 +31,7 @@ make                 # the libraries, under -O2 and -OC, with and without -g
 make check           # the tests that need no server
 make check-postgres  # the PostgreSQL tests, on a throwaway local cluster
 make install         # into ~/.local/lib/poc
+make uninstall       # remove them from ~/.local/lib/poc
 ```
 
 `make` builds three poc libraries, each in four variants (`O2`, `O2-g`,
@@ -48,6 +49,9 @@ make install         # into ~/.local/lib/poc
 ```
 make install PREFIX=/opt/podb
 ```
+
+`make uninstall`, given the same `PREFIX` or `POCLIBDIR`, removes the
+files that `make install` put there and leaves any other library's alone.
 
 A library records the poc version that built it. After upgrading poc, run
 `make clean install`.

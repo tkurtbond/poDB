@@ -3,6 +3,7 @@
 #   make                 build the poDB libraries under each size model, with
 #                        and without debug information (-g)
 #   make install         install them in $(POCLIBDIR), ~/.local/lib/poc by default
+#   make uninstall       remove them from $(POCLIBDIR)
 #   make check           the tests that need no server, under each size model
 #   make check-postgres  the tests that need the PostgreSQL test cluster
 #   make check-all       check and check-postgres
@@ -37,7 +38,7 @@ VARIANTS := $(MODELS) $(addsuffix -g,$(MODELS))
 # -O2 -g.
 variant-flags = -$(firstword $(subst -, ,$(1))) $(if $(filter %-g,$(1)),-g)
 
-.PHONY: all install check check-postgres check-all check-valgrind clean \
+.PHONY: all install uninstall check check-postgres check-all check-valgrind clean \
         $(addprefix check-,$(MODELS)) $(addprefix check-postgres-,$(MODELS))
 
 all: $(foreach v,$(VARIANTS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(v).stamp))
@@ -54,6 +55,28 @@ endef
 install: all
 	$(foreach v,$(VARIANTS),$(foreach l,$(LIBRARIES),$(POC) $(call variant-flags,$(v)) \
 	  -library-path $(LIBDIR) -install-library $(l) -output-dir $(POCLIBDIR)$(newline)))
+
+# uninstall removes from $(POCLIBDIR)/<triple>/<variant> what install put
+# there: each library's .library, .a and .so, and each module's .sym and
+# .owner.  It leaves other libraries' files alone, and removes a directory
+# only when nothing is left in it.  The triple is poc's target.
+MODULES := $(basename $(notdir $(filter %.Mod,$(DB_SOURCES) $(SQLITE_SOURCES) $(POSTGRES_SOURCES))))
+INSTALLED_FILES := $(foreach l,$(LIBRARIES),$(l).library lib$(l).a lib$(l).so) \
+  $(foreach m,$(MODULES),$(m).sym $(m).owner)
+
+uninstall:
+	@triple=$$($(POC) -version | sed -n 's/^target \([^ ]*\).*/\1/p'); \
+	if [ -z "$$triple" ]; then echo "uninstall: cannot get the target from $(POC) -version" >&2; exit 1; fi; \
+	for v in $(VARIANTS); do \
+	  dir=$(POCLIBDIR)/$$triple/$$v; \
+	  if [ -d "$$dir" ]; then \
+	    echo "cd $$dir && rm -f $(INSTALLED_FILES)"; \
+	    (cd "$$dir" && rm -f $(INSTALLED_FILES)) || exit 1; \
+	    rmdir "$$dir" 2>/dev/null || :; \
+	  fi; \
+	done; \
+	rmdir $(POCLIBDIR)/$$triple 2>/dev/null || :; \
+	rmdir $(POCLIBDIR) 2>/dev/null || :
 
 check: $(addprefix check-,$(MODELS))
 
