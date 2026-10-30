@@ -1,0 +1,2 @@
+* TODO Look into binding [[https://duckdb.org/docs/2.0/clients/c/overview][DuckDB]] using the C API 2.0.0.
+* TODO Look into binding Firebird embedded using the C (not C++) API.
