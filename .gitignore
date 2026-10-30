@@ -1,3 +1,12 @@
+*~
+.DS_Store
+.\#*
+.\#*
+.~
+.~*\#
+\#*\#
+
+
 # Everything the build writes
 build/
 *.sym
