@@ -15,8 +15,7 @@
 # build/lib/<triple>/<variant>/ (where poc puts them; a variant is O2, OC,
 # O2-g or OC-g), the test programs in build/<model>/test/.  Test programs
 # take Db and the drivers from the libraries, never from src/, so the
-# checks test what is installed.  A library records the poc version that
-# built it, so after upgrading poc, run make clean and make install again.
+# checks test what is installed.
 
 POC ?= poc
 MODELS ?= O2 OC
@@ -24,6 +23,14 @@ BUILD := build
 POCFLAGS ?= -trap-location
 PREFIX ?= $(HOME)/.local
 POCLIBDIR ?= $(PREFIX)/lib/poc
+
+# An installed library on POC_LIBRARY_PATH would be taken in place of this
+# checkout's source, or would stop the build if another poc wrote it.
+unexport POC_LIBRARY_PATH
+
+# A library records the poc that built it, and another poc refuses it, so
+# each library depends on poc itself.
+POCBIN := $(shell command -v $(POC))
 
 TOP := $(abspath .)
 
@@ -57,11 +64,12 @@ install: all
 	  -library-path $(LIBDIR) -install-library $(l) -output-dir $(POCLIBDIR)$(newline)))
 
 # uninstall removes from $(POCLIBDIR)/<triple>/<variant> what install put
-# there: each library's .library, .a and .so, and each module's .sym and
-# .owner.  It leaves other libraries' files alone, and removes a directory
-# only when nothing is left in it.  The triple is poc's target.
+# there: each library's .library, .a and .so (.so.0.0 on OpenBSD), and each
+# module's .sym and .owner.  It leaves other libraries' files alone, and
+# removes a directory only when nothing is left in it.  The triple is poc's
+# target.
 MODULES := $(basename $(notdir $(filter %.Mod,$(DB_SOURCES) $(SQLITE_SOURCES) $(POSTGRES_SOURCES))))
-INSTALLED_FILES := $(foreach l,$(LIBRARIES),$(l).library lib$(l).a lib$(l).so) \
+INSTALLED_FILES := $(foreach l,$(LIBRARIES),$(l).library lib$(l).a lib$(l).so lib$(l).so.0.0) \
   $(foreach m,$(MODULES),$(m).sym $(m).owner)
 
 uninstall:
@@ -126,15 +134,15 @@ endef
 
 # The stem is the variant.  db-%.stamp also matches db-sqlite-O2.stamp, but
 # GNU make takes the rule with the shorter stem, db-sqlite-%.stamp.
-$(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp
+$(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp $(POCBIN)
 	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),-link -lsqlite3)
 
 # poc finds DbPostgres.c beside DbPostgres.Mod and compiles it as the
 # module's C part, so only the module is named.
-$(LIBDIR)/db-postgres-%.stamp: $(POSTGRES_SOURCES) $(LIBDIR)/db-%.stamp
+$(LIBDIR)/db-postgres-%.stamp: $(POSTGRES_SOURCES) $(LIBDIR)/db-%.stamp $(POCBIN)
 	$(call build-library,$*,db-postgres,src/DbPostgres.Mod,-link -lpq)
 
-$(LIBDIR)/db-%.stamp: $(DB_SOURCES)
+$(LIBDIR)/db-%.stamp: $(DB_SOURCES) $(POCBIN)
 	$(call build-library,$*,db,$(DB_SOURCES))
 
 # $(call build-program,<model>,<source>,<extra poc arguments>) builds the

@@ -145,6 +145,11 @@ reasons.
   default.
 - `make uninstall`: remove from `$(POCLIBDIR)` the files `make install` put
   there, and any directory left empty.
+- The tests take `Db` and the drivers from `build/lib`, never from an
+  installed copy: the makefile unexports `POC_LIBRARY_PATH`, which would
+  otherwise put an installed library ahead of the checkout, and `install`
+  does not run the tests. The libraries depend on poc itself, so an upgrade
+  of poc rebuilds them.
 - `make check`: run every test that needs no server (the `Db` unit tests and
   the SQLite driver) under `-O2` and `-OC`.
 - `make check-postgres`: start the test cluster (if it is not running), run

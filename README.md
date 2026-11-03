@@ -53,8 +53,9 @@ make install PREFIX=/opt/podb
 `make uninstall`, given the same `PREFIX` or `POCLIBDIR`, removes the
 files that `make install` put there and leaves any other library's alone.
 
-A library records the poc version that built it. After upgrading poc, run
-`make clean install`.
+A library records the poc version that built it, and another poc refuses
+it, so `make` rebuilds the libraries after an upgrade of poc. Run
+`make install` to install the new ones.
 
 ## Using it
 
