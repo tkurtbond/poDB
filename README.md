@@ -20,6 +20,7 @@ The design, and the reasons for it, are in
   (`sqlite-devel`). The driver uses `sqlite3_changes64`, which 3.37 added.
 - For `DbPostgres`: libpq 17 or later and its development files
   (`libpq-devel`). The driver uses `PQclosePrepared`, which libpq 17 added.
+  Without them the build leaves `DbPostgres` out (see below).
 - For `make check-postgres`: `postgresql-server`, for `initdb` and `pg_ctl`.
   The tests make and run a private cluster of their own, under `build/`.
 - For `make check-valgrind`: valgrind.
@@ -42,6 +43,13 @@ make uninstall       # remove them from ~/.local/lib/poc
 | `db` | `Db`, `DbCStrings` | nothing |
 | `db-sqlite` | `DbSqlite` | `-lsqlite3` |
 | `db-postgres` | `DbPostgres` | `-lpq` |
+
+The build asks `pkg-config` for libpq 17 or later. If it is not there,
+`make` builds only `db` and `db-sqlite`, says so, and `make install`
+installs only those. `make check` then builds its test programs without
+`DbPostgres`, and `make check-postgres` reports that it skipped its tests.
+`make POSTGRES=no` leaves `db-postgres` out even when libpq is there, and
+`make POSTGRES=yes` builds it without asking `pkg-config`.
 
 `make install` installs them in `$(POCLIBDIR)`, which is
 `$(PREFIX)/lib/poc`, and `PREFIX` is `~/.local` by default:

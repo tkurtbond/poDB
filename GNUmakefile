@@ -10,6 +10,12 @@
 #   make check-valgrind  Conformance under valgrind, for leaks and memory errors
 #   make clean           remove build/
 #
+# DbPostgres needs libpq 17 or later (for PQclosePrepared), with its header
+# and link library.  If pkg-config does not find that, the build leaves out
+# db-postgres, the checks build their programs without DbPostgres, and the
+# PostgreSQL checks are skipped.  POSTGRES=yes or POSTGRES=no overrides the
+# test.
+#
 # Modules compiled under -O2 cannot be mixed with modules compiled under -OC,
 # so each size model builds separately: the libraries in
 # build/lib/<triple>/<variant>/ (where poc puts them; a variant is O2, OC,
@@ -38,7 +44,21 @@ LIBDIR := $(BUILD)/lib
 DB_SOURCES := src/Db.Mod src/DbCStrings.Mod
 SQLITE_SOURCES := src/DbSqlite.Mod
 POSTGRES_SOURCES := src/DbPostgres.Mod src/DbPostgres.c
-LIBRARIES := db db-sqlite db-postgres
+ALL_LIBRARIES := db db-sqlite db-postgres
+
+# POSTGRES is yes when pkg-config finds libpq 17 or later.
+ifndef POSTGRES
+POSTGRES := $(shell pkg-config --exists 'libpq >= 17' 2>/dev/null && echo yes || echo no)
+endif
+ifeq ($(POSTGRES),yes)
+LIBRARIES := $(ALL_LIBRARIES)
+PQLINK := -link -lpq
+else ifeq ($(POSTGRES),no)
+LIBRARIES := $(filter-out db-postgres,$(ALL_LIBRARIES))
+PQLINK :=
+else
+$(error POSTGRES must be yes or no, not "$(POSTGRES)")
+endif
 VARIANTS := $(MODELS) $(addsuffix -g,$(MODELS))
 
 # $(call variant-flags,<variant>) gives poc's flags for a variant: O2-g gives
@@ -49,6 +69,9 @@ variant-flags = -$(firstword $(subst -, ,$(1))) $(if $(filter %-g,$(1)),-g)
         $(addprefix check-,$(MODELS)) $(addprefix check-postgres-,$(MODELS))
 
 all: $(foreach v,$(VARIANTS),$(foreach l,$(LIBRARIES),$(LIBDIR)/$(l)-$(v).stamp))
+ifneq ($(POSTGRES),yes)
+	@echo "poDB: libpq 17 or later was not found, so db-postgres was not built."
+endif
 
 # install copies each library, in each variant, into $(POCLIBDIR).  A
 # program then finds them with -library-path $(POCLIBDIR); installed in
@@ -69,7 +92,7 @@ install: all
 # removes a directory only when nothing is left in it.  The triple is poc's
 # target.
 MODULES := $(basename $(notdir $(filter %.Mod,$(DB_SOURCES) $(SQLITE_SOURCES) $(POSTGRES_SOURCES))))
-INSTALLED_FILES := $(foreach l,$(LIBRARIES),$(l).library lib$(l).a lib$(l).so lib$(l).so.0.0) \
+INSTALLED_FILES := $(foreach l,$(ALL_LIBRARIES),$(l).library lib$(l).a lib$(l).so lib$(l).so.0.0) \
   $(foreach m,$(MODULES),$(m).sym $(m).owner)
 
 uninstall:
@@ -93,6 +116,7 @@ check-all: check check-postgres
 # check-postgres runs against $$PODB_PG_URL if it is set.  Otherwise it starts
 # the test cluster in build/pgdata, runs the tests and stops the cluster,
 # whether or not they pass.
+ifeq ($(POSTGRES),yes)
 check-postgres: all
 	@if [ -n "$$PODB_PG_URL" ]; then \
 	  $(MAKE) --no-print-directory $(addprefix check-postgres-,$(MODELS)); \
@@ -101,6 +125,10 @@ check-postgres: all
 	  $(MAKE) --no-print-directory $(addprefix check-postgres-,$(MODELS)); status=$$?; \
 	  test/pg-stop.sh; exit $$status; \
 	fi
+else
+check-postgres: all
+	@echo "== SKIPPED: the PostgreSQL checks, because db-postgres was not built"
+endif
 
 # check-valgrind runs Conformance (-O2) under valgrind with each driver and
 # fails on a memory error or on any block still allocated at exit that is
@@ -115,12 +143,16 @@ check-valgrind: check-O2
 	@echo "== conformance under valgrind, SQLite (-O2)"
 	$(VALGRIND) $(BUILD)/O2/test/Conformance sqlite::memory: > $(BUILD)/O2/test/Conformance-valgrind.out
 	diff -u test/Conformance.expected $(BUILD)/O2/test/Conformance-valgrind.out
+ifeq ($(POSTGRES),yes)
 	@echo "== conformance under valgrind, PostgreSQL (-O2)"
 	@if [ -n "$$PODB_PG_URL" ]; then started=; else test/pg-start.sh || exit 1; started=yes; fi; \
 	$(VALGRIND) $(BUILD)/O2/test/Conformance "$$(test/pg-url.sh)" > $(BUILD)/O2/test/Conformance-valgrind.out; \
 	status=$$?; \
 	if [ -n "$$started" ]; then test/pg-stop.sh; fi; \
 	[ $$status -eq 0 ] && diff -u test/Conformance.expected $(BUILD)/O2/test/Conformance-valgrind.out
+else
+	@echo "== SKIPPED: conformance under valgrind, PostgreSQL, because db-postgres was not built"
+endif
 
 clean:
 	rm -rf $(BUILD)
@@ -155,8 +187,29 @@ cd $(dir $(2)) && $(POC) -$(1) $(POCFLAGS) -library-path $(TOP)/$(LIBDIR) \
   $(3) $(notdir $(2))
 endef
 
+# DbDemo and Conformance import DbPostgres so that its driver registers
+# itself.  Without db-postgres the checks build them from a copy, in
+# build/<model>/nopg/, with DbPostgres taken out of the import list.
+# $(call any-driver-source,<model>,<source>) gives the source to build.
+ifeq ($(POSTGRES),yes)
+any-driver-source = $(2)
+else
+any-driver-source = $(BUILD)/$(1)/nopg/$(notdir $(2))
+
+$(BUILD)/%/nopg/DbDemo.Mod: examples/DbDemo.Mod
+	@mkdir -p $(dir $@)
+	sed 's/, DbPostgres;/;/' $< > $@
+	! grep -q DbPostgres $@
+
+$(BUILD)/%/nopg/Conformance.Mod: test/Conformance.Mod
+	@mkdir -p $(dir $@)
+	sed 's/, DbPostgres;/;/' $< > $@
+	! grep -q DbPostgres $@
+endif
+
 # check-<model> runs every test that needs no server under <model>.
-$(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.stamp,$(LIBRARIES)))
+$(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.stamp,$(LIBRARIES))) \
+  $(call any-driver-source,%,examples/DbDemo.Mod) $(call any-driver-source,%,test/Conformance.Mod)
 	@echo "== smoke test (-$*)"
 	$(call build-program,$*,test/SmokeSqlite.Mod,-link -lsqlite3)
 	$(BUILD)/$*/test/SmokeSqlite > $(BUILD)/$*/test/SmokeSqlite.out
@@ -166,7 +219,7 @@ $(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.st
 	$(BUILD)/$*/test/TestDb > $(BUILD)/$*/test/TestDb.out
 	diff -u test/TestDb.expected $(BUILD)/$*/test/TestDb.out
 	@echo "== DbDemo against the libraries (-$*)"
-	$(call build-program,$*,examples/DbDemo.Mod)
+	$(call build-program,$*,$(call any-driver-source,$*,examples/DbDemo.Mod))
 	$(BUILD)/$*/test/DbDemo sqlite::memory: > $(BUILD)/$*/test/DbDemo.out
 	diff -u test/DbDemo.expected $(BUILD)/$*/test/DbDemo.out
 	rm -f $(BUILD)/$*/test/demo.db
@@ -174,12 +227,12 @@ $(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.st
 	$(BUILD)/$*/test/DbDemo sqlite:$(BUILD)/$*/test/demo.db >> $(BUILD)/$*/test/DbDemo.out
 	cat test/DbDemo.expected test/DbDemo.expected | diff -u - $(BUILD)/$*/test/DbDemo.out
 	@echo "== DbDemo from source (-$*)"
-	cd examples && $(POC) -$* $(POCFLAGS) -import-path $(TOP)/src \
+	cd $(dir $(call any-driver-source,$*,examples/DbDemo.Mod)) && $(POC) -$* $(POCFLAGS) -import-path $(TOP)/src \
 	  -output-dir $(TOP)/$(BUILD)/$*/source -o $(TOP)/$(BUILD)/$*/source/DbDemo \
-	  -link -lsqlite3 -link -lpq DbDemo.Mod
+	  -link -lsqlite3 $(PQLINK) DbDemo.Mod
 	$(BUILD)/$*/source/DbDemo sqlite::memory: | diff -u test/DbDemo.expected -
 	@echo "== conformance, SQLite (-$*)"
-	$(call build-program,$*,test/Conformance.Mod)
+	$(call build-program,$*,$(call any-driver-source,$*,test/Conformance.Mod))
 	$(BUILD)/$*/test/Conformance sqlite::memory: > $(BUILD)/$*/test/Conformance-sqlite.out
 	diff -u test/Conformance.expected $(BUILD)/$*/test/Conformance-sqlite.out
 

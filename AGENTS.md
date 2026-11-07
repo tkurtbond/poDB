@@ -141,6 +141,12 @@ reasons.
 
 - `make`: build the poDB libraries under both size models, with and without
   `-g`, in `build/`.
+- Without libpq 17 or later (as `pkg-config` reports it), `make` leaves out
+  `db-postgres`; `POSTGRES=yes` or `POSTGRES=no` overrides the test. The
+  checks then build `DbDemo` and `Conformance` from copies in
+  `build/<model>/nopg/` with `DbPostgres` taken out of their imports, and
+  skip the PostgreSQL tests, saying so. A commit made that way must say the
+  PostgreSQL tests did not run.
 - `make install`: install them in `$(POCLIBDIR)`, `~/.local/lib/poc` by
   default.
 - `make uninstall`: remove from `$(POCLIBDIR)` the files `make install` put
