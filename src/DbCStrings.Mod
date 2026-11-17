@@ -25,7 +25,7 @@ PROCEDURE Copy* (p: SYSTEM.ADDRESS; VAR out: ARRAY OF CHAR);
   VAR n: SYSTEM.ADDRESS;
 BEGIN
   n := Length(p);
-  IF n > LEN(out) - 1 THEN n := LEN(out) - 1 END;
+  IF n > LEN(out) - 1 THEN n := SYSTEM.VAL(SYSTEM.ADDRESS, LEN(out) - 1) END;
   IF n > 0 THEN SYSTEM.MOVE(p, SYSTEM.ADR(out[0]), n) END;
   out[n] := 0X
 END Copy;
