@@ -16,6 +16,10 @@
 # PostgreSQL checks are skipped.  POSTGRES=yes or POSTGRES=no overrides the
 # test.
 #
+# The include and library directories of libpq and SQLite come from
+# pkg-config (on the BSDs they are under /usr/local or /usr/pkg), and
+# SQLITE_FLAGS and PQ_FLAGS, as poc arguments, override them.
+#
 # Modules compiled under -O2 cannot be mixed with modules compiled under -OC,
 # so each size model builds separately: the libraries in
 # build/lib/<triple>/<variant>/ (where poc puts them; a variant is O2, OC,
@@ -50,12 +54,33 @@ ALL_LIBRARIES := db db-sqlite db-postgres
 ifndef POSTGRES
 POSTGRES := $(shell pkg-config --exists 'libpq >= 17' 2>/dev/null && echo yes || echo no)
 endif
+
+# $(call pkg-flags,<package>,<fallback libraries>) gives pkg-config's flags
+# for <package> as poc arguments: each C flag after -c-flag, each linker flag
+# after -link.  Without the package's .pc file it gives the fallback.
+# NetBSD's run-time linker does not search /usr/pkg/lib, so there each -L
+# directory is also a run path; the libraries record it, and a program
+# linked with them gets it too.
+NETBSD := $(filter NetBSD,$(shell uname -s))
+comma := ,
+pkg-flags = $(foreach f,$(shell pkg-config --cflags $(1) 2>/dev/null),-c-flag $(f)) \
+  $(call link-flags,$(or $(shell pkg-config --libs $(1) 2>/dev/null),$(2)))
+# $(call link-flags,<linker flags>) puts -link before each, and on NetBSD adds
+# a run path for each -L directory that has none among them.
+link-flags = $(foreach f,$(1),-link $(f) $(if $(NETBSD),$(call run-path,$(patsubst -L%,%,$(filter -L%,$(f))),$(1))))
+run-path = $(if $(1),$(if $(filter -Wl$(comma)-R$(1),$(2)),,-link -Wl$(comma)-R$(1)))
+
+ifndef SQLITE_FLAGS
+SQLITE_FLAGS := $(strip $(call pkg-flags,sqlite3,-lsqlite3))
+endif
 ifeq ($(POSTGRES),yes)
 LIBRARIES := $(ALL_LIBRARIES)
-PQLINK := -link -lpq
+ifndef PQ_FLAGS
+PQ_FLAGS := $(strip $(call pkg-flags,libpq,-lpq))
+endif
 else ifeq ($(POSTGRES),no)
 LIBRARIES := $(filter-out db-postgres,$(ALL_LIBRARIES))
-PQLINK :=
+PQ_FLAGS :=
 else
 $(error POSTGRES must be yes or no, not "$(POSTGRES)")
 endif
@@ -167,12 +192,12 @@ endef
 # The stem is the variant.  db-%.stamp also matches db-sqlite-O2.stamp, but
 # GNU make takes the rule with the shorter stem, db-sqlite-%.stamp.
 $(LIBDIR)/db-sqlite-%.stamp: $(SQLITE_SOURCES) $(LIBDIR)/db-%.stamp $(POCBIN)
-	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),-link -lsqlite3)
+	$(call build-library,$*,db-sqlite,$(SQLITE_SOURCES),$(SQLITE_FLAGS))
 
 # poc finds DbPostgres.c beside DbPostgres.Mod and compiles it as the
 # module's C part, so only the module is named.
 $(LIBDIR)/db-postgres-%.stamp: $(POSTGRES_SOURCES) $(LIBDIR)/db-%.stamp $(POCBIN)
-	$(call build-library,$*,db-postgres,src/DbPostgres.Mod,-link -lpq)
+	$(call build-library,$*,db-postgres,src/DbPostgres.Mod,$(PQ_FLAGS))
 
 $(LIBDIR)/db-%.stamp: $(DB_SOURCES) $(POCBIN)
 	$(call build-library,$*,db,$(DB_SOURCES))
@@ -211,7 +236,7 @@ endif
 $(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.stamp,$(LIBRARIES))) \
   $(call any-driver-source,%,examples/DbDemo.Mod) $(call any-driver-source,%,test/Conformance.Mod)
 	@echo "== smoke test (-$*)"
-	$(call build-program,$*,test/SmokeSqlite.Mod,-link -lsqlite3)
+	$(call build-program,$*,test/SmokeSqlite.Mod,$(SQLITE_FLAGS))
 	$(BUILD)/$*/test/SmokeSqlite > $(BUILD)/$*/test/SmokeSqlite.out
 	pkg-config --modversion sqlite3 | diff -u - $(BUILD)/$*/test/SmokeSqlite.out
 	@echo "== Db unit tests (-$*)"
@@ -229,7 +254,7 @@ $(addprefix check-,$(MODELS)): check-%: $(addprefix $(LIBDIR)/,$(addsuffix -%.st
 	@echo "== DbDemo from source (-$*)"
 	cd $(dir $(call any-driver-source,$*,examples/DbDemo.Mod)) && $(POC) -$* $(POCFLAGS) -import-path $(TOP)/src \
 	  -output-dir $(TOP)/$(BUILD)/$*/source -o $(TOP)/$(BUILD)/$*/source/DbDemo \
-	  -link -lsqlite3 $(PQLINK) DbDemo.Mod
+	  $(SQLITE_FLAGS) $(PQ_FLAGS) DbDemo.Mod
 	$(BUILD)/$*/source/DbDemo sqlite::memory: | diff -u test/DbDemo.expected -
 	@echo "== conformance, SQLite (-$*)"
 	$(call build-program,$*,$(call any-driver-source,$*,test/Conformance.Mod))

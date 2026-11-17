@@ -269,7 +269,7 @@ poc -library-path . -link -lpq -library db-postgres src/DbPostgres.Mod
 poc -library-path <dir> DbDemo.Mod
 ```
 
-poc compiles `DbPostgres.c` as `DbPostgres`'s C part because it lies beside `DbPostgres.Mod`. A program built from the sources rather than the libraries names the C libraries itself: `poc -import-path src -link -lsqlite3 -link -lpq DbDemo.Mod`. The repository's `GNUmakefile` builds each library under `-O2` and `-OC`, with and without `-g`, and `make install` installs them.
+poc compiles `DbPostgres.c` as `DbPostgres`'s C part because it lies beside `DbPostgres.Mod`. A program built from the sources rather than the libraries names the C libraries itself: `poc -import-path src -link -lsqlite3 -link -lpq DbDemo.Mod`. The repository's `GNUmakefile` builds each library under `-O2` and `-OC`, with and without `-g`, and `make install` installs them. It takes each C library's include and library directories from `pkg-config` (`SQLITE_FLAGS`, `PQ_FLAGS`), and they are recorded with the link arguments, so on the BSDs too a program that uses the libraries needs none of them.
 
 ### 6.2 Decisions
 

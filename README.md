@@ -51,6 +51,17 @@ installs only those. `make check` then builds its test programs without
 `make POSTGRES=no` leaves `db-postgres` out even when libpq is there, and
 `make POSTGRES=yes` builds it without asking `pkg-config`.
 
+The header and library directories of SQLite and libpq come from
+`pkg-config` too (on the BSDs they are under `/usr/local` or `/usr/pkg`);
+without `sqlite3.pc` the build links with plain `-lsqlite3`. On NetBSD
+each library directory is also made a run path (`-Wl,-R`), since its
+run-time linker does not search `/usr/pkg/lib`. `SQLITE_FLAGS` and
+`PQ_FLAGS`, given as poc arguments, override what `pkg-config` says:
+
+```
+make PQ_FLAGS='-c-flag -I/opt/pg/include -link -L/opt/pg/lib -link -lpq'
+```
+
 `make install` installs them in `$(POCLIBDIR)`, which is
 `$(PREFIX)/lib/poc`, and `PREFIX` is `~/.local` by default:
 

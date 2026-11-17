@@ -531,6 +531,46 @@ under "Later":
 rejects; `TestPostgres` checks the session's zone, a `timestamptz` given
 at `+02`, and a time stamp bound to a `timestamptz`.
 
+## Bugs
+
+- **The `GNUmakefile` does not pass pkg-config's flags for libpq and
+  SQLite to poc** (found 2026-11-17, installing on terhali and erekose).
+  `POSTGRES` asks `pkg-config` whether libpq 17 or later is there, but the
+  build then passes only `-link -lpq`, and SQLite only `-link -lsqlite3`,
+  never the `-I` and `-L` that `pkg-config --cflags --libs` gives. That
+  works only where the headers are in `/usr/include` and the libraries on
+  the linker's default path, as on Fedora:
+  - terhali (NetBSD 11.0 amd64, pkgsrc's `postgresql18-client`):
+    `DbPostgres.c` failed with "'libpq-fe.h' file not found", the header
+    being `/usr/pkg/include/libpq-fe.h`, and then the shared library did not
+    link without `-L/usr/pkg/lib`.
+  - erekose (OpenBSD 7.9 i386, `postgresql-client` 18.6): `ld: error:
+    unable to find library -lsqlite3` (it is in `/usr/local/lib`), and the
+    header is `/usr/local/include/postgresql/libpq-fe.h`.
+
+  Worked around on the command line with `POCFLAGS`: on terhali
+  `POCFLAGS='-trap-location -c-flag -I/usr/pkg/include -link -L/usr/pkg/lib
+  -link -Wl,-R/usr/pkg/lib'`, on erekose `POCFLAGS='-trap-location -c-flag
+  -I/usr/local/include/postgresql -c-flag -I/usr/local/include -link
+  -L/usr/local/lib'`. The fix: take `pkg-config --cflags` and `--libs` of
+  `libpq` and of `sqlite3` (as polibfyaml's `GNUmakefile` does for
+  libfyaml, each flag as `-c-flag` or `-link`), with `-lsqlite3` as the
+  fallback where `sqlite3.pc` is missing, and a run path on NetBSD, whose
+  linker does not search `/usr/pkg/lib` at run time. Part of "The BSDs"
+  under "Later, not scheduled". **Fixed** (2026-11-17): `SQLITE_FLAGS`
+  and `PQ_FLAGS` come from `pkg-config` (the fallback `-lsqlite3` and
+  `-lpq`), with a run path for each `-L` on NetBSD that has none, and
+  can be given on the command line; `make all check` and `make install`
+  pass on terhali and erekose with no other flags.
+
+- **`DbCStrings.Copy` does not compile under `-OC` on a 32-bit target**
+  (found 2026-11-17 on erekose, OpenBSD 7.9 i386): `src/DbCStrings.Mod:28:28:
+  error: assignment is not type-compatible: LONGINT to SYSTEM.ADDRESS`, at
+  `n := LEN(out) - 1`. `LEN` gives a `LONGINT`, 8 bytes under `-OC`, and
+  `SYSTEM.ADDRESS` is 4 bytes there, so the `-OC` variants are not built
+  (`-O2`'s are). **Fixed** (2026-11-17): `n := SYSTEM.VAL(SYSTEM.ADDRESS,
+  LEN(out) - 1)`.
+
 ## Later, not scheduled
 
 - Finalizers (Phase 5, step 2): register a `GarbageCollectedHeap` finalizer
